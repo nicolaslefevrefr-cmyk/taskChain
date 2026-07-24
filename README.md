@@ -12,12 +12,13 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 - **Release-order warning**: any task that is not yet Released while one of its descendants already is gets a dashed orange outline (Tree and Planning views) or a warning icon (List view and its own edit modal).
 - **3 tabs**:
   - **List** — filterable/searchable table with inline editing. The "Depends on" column shows both the ID and the title of each parent (e.g. `T-1: Design`).
-  - **Tree** — parent/child hierarchy, collapsible, color-coded by status.
+  - **Tree** — parent/child hierarchy, collapsible, color-coded by status. A task with several parents is shown in full only once, under its first ("primary") parent; under its other parents it shows as a small dashed **reference** card (↳) — click it to jump straight to the full entry (it scrolls there and flashes briefly), instead of duplicating the whole branch.
   - **Planning** — Kanban board (drag a card to another status column) plus a schedule-aware timeline (Gantt) underneath.
 - **Chain-aware scheduling ("retro-planning") built into the Planning tab**: a task doesn't need its own deadline to appear on the timeline. As long as *some* task further down its dependency chain has a deadline and a duration, every task in between gets a **calculated deadline** (dashed bar, shown in gray in the List/edit-modal). If a task's own deadline is later than what its descendants require, it's flagged as a conflict (red outline / warning icon).
 - **Weekends are excluded** from every date calculation (durations, calculated deadlines, bar lengths).
 - **Timeline controls**: zoom in/out buttons to change the day granularity (bars hide their inner text when they get too small), light vertical lines separating each week, and weekend columns lightly shaded.
 - **JSON save/load**: export/import a `.json` file with the whole project. A local autosave (`localStorage`) also protects your work between sessions in the same browser.
+- **Firebase sync** (optional): the "☁ Firebase" button opens a modal to save/load the whole project as JSON to/from your own Firebase project (Firestore). See [Setting up Firebase](#setting-up-firebase) below.
 - Clean, light, no-nonsense theme.
 
 ## Using it locally
@@ -60,6 +61,52 @@ Just open `index.html` in a browser — no install, no server needed.
 }
 ```
 In this example `T-2` has an explicit deadline; `T-1` has none, so the app automatically calculates one for it (business days only) from `T-2`'s deadline and duration.
+
+## Setting up Firebase
+
+The app can save/load its whole JSON project to a Firestore document in your own Firebase project. The Firebase SDK is only loaded (from Google's CDN) the first time you open the "☁ Firebase" modal — projects that never use it pay no extra cost.
+
+**1. Create a Firebase project**
+Go to [console.firebase.google.com](https://console.firebase.google.com), click **Add project**, and follow the steps (Google Analytics is not needed).
+
+**2. Register a Web app**
+In the project overview, click the **`</>`** (Web) icon to register a new web app. Firebase will show you a config object that looks like:
+```js
+const firebaseConfig = {
+  apiKey: "AIza…",
+  authDomain: "my-project.firebaseapp.com",
+  projectId: "my-project",
+  storageBucket: "my-project.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef"
+};
+```
+Copy these six values into the matching fields of the "☁ Firebase" modal in the app.
+
+**3. Enable Firestore**
+In the console sidebar: **Build → Firestore Database → Create database**. Any region is fine; start in **production mode** (we'll set rules below).
+
+**4. Enable Anonymous Authentication**
+In the console sidebar: **Build → Authentication → Sign-in method → Add new provider → Anonymous → Enable**. The app signs each visitor in anonymously behind the scenes (no login screen) purely so your Firestore rules can require `request.auth != null`.
+
+**5. Set Firestore security rules**
+In **Firestore Database → Rules**, use something like:
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /taskchain_projects/{docId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+```
+Then click **Publish**.
+
+**6. Pick a document name**
+In the app's Firebase modal, the "Document name" field is the ID of the Firestore document your project is stored under (inside the `taskchain_projects` collection). Anyone with your Firebase config *and* this exact document name can read/write that document, so pick something unlikely to be guessed (e.g. `acme-widget-plan-8k2`) rather than something short like `project1`.
+
+**A note on security**: a Firebase web config (the six values above) is not a secret the way an API key on a server would be — it's normal for it to be visible in a public site's source, and Google's own docs say so. Real access control comes from the security rules in step 5. The rule above lets *any* anonymously-authenticated visitor read/write *any* document in `taskchain_projects`, which combined with a hard-to-guess document name is reasonable for personal or small-team use, but is not equivalent to a real login system. If you need stronger guarantees (e.g. only specific people can access a given project), you would need to replace anonymous sign-in with real user accounts and rules keyed to `request.auth.uid` — that's outside the scope of this simple version.
 
 ## Possible next steps
 

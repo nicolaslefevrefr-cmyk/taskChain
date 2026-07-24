@@ -149,6 +149,14 @@ function getAncestors(taskId, visited = new Set()) {
   return result;
 }
 
+// A task with several parents renders its full subtree only once, under
+// its "primary" parent (the first one listed). Its other parents show a
+// compact reference instead of duplicating the whole branch — see
+// renderTreeReferenceNode().
+function primaryParentId(task) {
+  return task.parents.length ? task.parents[0] : null;
+}
+
 /* =========================================================
    SCHEDULE ENGINE
    For every task computes { finish, finishSource, start, conflict }.
@@ -629,16 +637,20 @@ function renderTree() {
 function renderTreeNode(task, ancestryPath, warnMap) {
   const node = document.createElement('div');
   node.className = 'tree-node';
+  node.id = `tree-task-${task.id}`;
 
-  const children = getChildren(task.id).sort((a, b) => a.title.localeCompare(b.title));
+  const allChildren = getChildren(task.id).sort((a, b) => a.title.localeCompare(b.title));
+  const primaryChildren = allChildren.filter(c => primaryParentId(c) === task.id);
+  const secondaryChildren = allChildren.filter(c => primaryParentId(c) !== task.id);
   const collapsed = ui.collapsedNodes.has(task.id);
   const isCycle = ancestryPath.has(task.id);
+  const hasExpandable = (primaryChildren.length || secondaryChildren.length) && !isCycle;
 
   const row = document.createElement('div');
   row.className = 'tree-node-row';
 
   const toggle = document.createElement('button');
-  toggle.className = 'tree-toggle' + (children.length && !isCycle ? '' : ' leaf');
+  toggle.className = 'tree-toggle' + (hasExpandable ? '' : ' leaf');
   toggle.textContent = collapsed ? '▶' : '▼';
   toggle.onclick = () => {
     if (collapsed) ui.collapsedNodes.delete(task.id); else ui.collapsedNodes.add(task.id);
@@ -651,9 +663,13 @@ function renderTreeNode(task, ancestryPath, warnMap) {
   if (warnMap.has(task.id)) {
     card.title = `Not yet Released, but ${warnMap.get(task.id).map(c => c.id).join(', ')} already is/are.`;
   }
+  const multiParentBadge = task.parents.length > 1
+    ? `<span class="tree-multi-badge" title="Depends on ${task.parents.length} parent tasks">⛓ ${task.parents.length}</span>`
+    : '';
   card.innerHTML = `
     <span class="id-tag">${task.id}</span>
     <span class="tree-node-title">${escapeHtml(task.title)}</span>
+    ${multiParentBadge}
     <span class="tree-node-meta">
       ${task.deadline ? `<span class="label-hint">${formatDate(task.deadline)}</span>` : ''}
       ${statusBadge(task.status)}
@@ -665,15 +681,19 @@ function renderTreeNode(task, ancestryPath, warnMap) {
   if (task.parents.length > 1) {
     const note = document.createElement('div');
     note.className = 'tree-extra-parent';
-    note.textContent = `also linked to: ${task.parents.join(', ')}`;
+    note.textContent = `Depends on: ${task.parents.map(pid => {
+      const p = getTask(pid);
+      return p ? `${pid} (${p.title})` : pid;
+    }).join(', ')}`;
     node.appendChild(note);
   }
 
-  if (children.length && !isCycle && !collapsed) {
+  if (hasExpandable && !collapsed) {
     const childWrap = document.createElement('div');
     childWrap.className = 'tree-children';
     const newPath = new Set(ancestryPath); newPath.add(task.id);
-    children.forEach(c => childWrap.appendChild(renderTreeNode(c, newPath, warnMap)));
+    primaryChildren.forEach(c => childWrap.appendChild(renderTreeNode(c, newPath, warnMap)));
+    secondaryChildren.forEach(c => childWrap.appendChild(renderTreeReferenceNode(c)));
     node.appendChild(childWrap);
   } else if (isCycle) {
     const warn = document.createElement('div');
@@ -683,6 +703,57 @@ function renderTreeNode(task, ancestryPath, warnMap) {
   }
 
   return node;
+}
+
+// Compact, non-expandable stand-in shown under every parent that is NOT
+// this task's primary parent. Clicking it jumps to (and briefly
+// highlights) the task's one full entry in the tree instead of
+// duplicating its whole subtree here.
+function renderTreeReferenceNode(task) {
+  const node = document.createElement('div');
+  node.className = 'tree-node tree-node-reference';
+
+  const row = document.createElement('div');
+  row.className = 'tree-node-row';
+
+  const spacer = document.createElement('span');
+  spacer.className = 'tree-toggle leaf';
+  row.appendChild(spacer);
+
+  const card = document.createElement('div');
+  card.className = `tree-node-card tree-ref-card status-${task.status}`;
+  card.title = 'This task has more than one parent — click to jump to its full entry';
+  card.innerHTML = `
+    <span class="tree-ref-icon">↳</span>
+    <span class="id-tag">${task.id}</span>
+    <span class="tree-node-title">${escapeHtml(task.title)}</span>
+    <span class="tree-node-meta">${statusBadge(task.status)}</span>`;
+  card.onclick = () => jumpToTreeTask(task.id);
+  row.appendChild(card);
+  node.appendChild(row);
+  return node;
+}
+
+// Expands every ancestor along the target's primary-parent chain so its
+// full entry is visible, then scrolls to it and flashes it briefly.
+function jumpToTreeTask(taskId) {
+  let t = getTask(taskId);
+  while (t) {
+    const pid = primaryParentId(t);
+    if (!pid) break;
+    ui.collapsedNodes.delete(pid);
+    t = getTask(pid);
+  }
+  renderTree();
+  requestAnimationFrame(() => {
+    const target = document.getElementById(`tree-task-${taskId}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const card = target.querySelector('.tree-node-card');
+    if (!card) return;
+    card.classList.add('tree-flash');
+    setTimeout(() => card.classList.remove('tree-flash'), 1500);
+  });
 }
 
 /* =========================================================
@@ -921,6 +992,159 @@ function importJSONFile(file) {
 }
 
 /* =========================================================
+   FIREBASE SYNC
+   Lazily loads the Firebase compat SDK only when the user opens the
+   Firebase modal, so projects that never use it pay no extra cost.
+   The whole project JSON is stored as a single field on one Firestore
+   document, identified by a user-chosen "document name". The app signs
+   in anonymously so Firestore rules can require request.auth != null
+   without needing a real login screen — see README for the setup and
+   the security trade-offs of this approach.
+   ========================================================= */
+const FIREBASE_CONFIG_KEY = 'taskchain_firebase_config_v1';
+const FIREBASE_SDK_VERSION = '10.12.5';
+let firebaseApp = null;
+let firebaseAuthReadyPromise = null;
+
+function loadFirebaseSdk() {
+  if (window.firebase && window.firebase.firestore) return Promise.resolve();
+  const urls = [
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-app-compat.js`,
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-auth-compat.js`,
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-firestore-compat.js`,
+  ];
+  return urls.reduce((chain, src) => chain.then(() => new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Could not load the Firebase SDK. Check your internet connection.'));
+    document.head.appendChild(s);
+  })), Promise.resolve());
+}
+
+function getStoredFirebaseConfig() {
+  try { return JSON.parse(localStorage.getItem(FIREBASE_CONFIG_KEY) || 'null'); } catch (e) { return null; }
+}
+
+function readFirebaseFormConfig() {
+  return {
+    apiKey: document.getElementById('fbApiKey').value.trim(),
+    authDomain: document.getElementById('fbAuthDomain').value.trim(),
+    projectId: document.getElementById('fbProjectId').value.trim(),
+    storageBucket: document.getElementById('fbStorageBucket').value.trim(),
+    messagingSenderId: document.getElementById('fbMessagingSenderId').value.trim(),
+    appId: document.getElementById('fbAppId').value.trim(),
+    docId: document.getElementById('fbDocId').value.trim() || 'default',
+  };
+}
+
+function fillFirebaseForm(cfg) {
+  document.getElementById('fbApiKey').value = cfg?.apiKey || '';
+  document.getElementById('fbAuthDomain').value = cfg?.authDomain || '';
+  document.getElementById('fbProjectId').value = cfg?.projectId || '';
+  document.getElementById('fbStorageBucket').value = cfg?.storageBucket || '';
+  document.getElementById('fbMessagingSenderId').value = cfg?.messagingSenderId || '';
+  document.getElementById('fbAppId').value = cfg?.appId || '';
+  document.getElementById('fbDocId').value = cfg?.docId || '';
+}
+
+function setFirebaseStatus(msg, isError) {
+  const el = document.getElementById('fbStatus');
+  el.textContent = msg;
+  el.className = 'field-note' + (isError ? ' conflict' : '');
+}
+
+async function ensureFirebaseReady(cfg) {
+  await loadFirebaseSdk();
+  if (!firebaseApp) {
+    firebaseApp = firebase.apps.length ? firebase.app() : firebase.initializeApp({
+      apiKey: cfg.apiKey,
+      authDomain: cfg.authDomain,
+      projectId: cfg.projectId,
+      storageBucket: cfg.storageBucket,
+      messagingSenderId: cfg.messagingSenderId,
+      appId: cfg.appId,
+    });
+  }
+  if (!firebaseAuthReadyPromise) {
+    firebaseAuthReadyPromise = firebase.auth().signInAnonymously();
+  }
+  await firebaseAuthReadyPromise;
+}
+
+function persistFirebaseConfigIfChecked(cfg) {
+  if (document.getElementById('fbRememberConfig').checked) {
+    localStorage.setItem(FIREBASE_CONFIG_KEY, JSON.stringify(cfg));
+  } else {
+    localStorage.removeItem(FIREBASE_CONFIG_KEY);
+  }
+}
+
+async function handleFirebaseSave() {
+  const cfg = readFirebaseFormConfig();
+  if (!cfg.apiKey || !cfg.projectId || !cfg.appId) {
+    setFirebaseStatus('Please fill in at least the API key, Project ID and App ID.', true);
+    return;
+  }
+  persistFirebaseConfigIfChecked(cfg);
+  setFirebaseStatus('Connecting…', false);
+  try {
+    await ensureFirebaseReady(cfg);
+    const db = firebase.firestore();
+    await db.collection('taskchain_projects').doc(cfg.docId).set({
+      json: JSON.stringify(state),
+      projectName: state.meta.projectName,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    setFirebaseStatus(`Saved to Firebase as "${cfg.docId}".`, false);
+    toast('Project saved to Firebase.');
+  } catch (e) {
+    setFirebaseStatus('Save failed: ' + (e.message || e), true);
+  }
+}
+
+async function handleFirebaseLoad() {
+  const cfg = readFirebaseFormConfig();
+  if (!cfg.apiKey || !cfg.projectId || !cfg.appId) {
+    setFirebaseStatus('Please fill in at least the API key, Project ID and App ID.', true);
+    return;
+  }
+  persistFirebaseConfigIfChecked(cfg);
+  setFirebaseStatus('Connecting…', false);
+  try {
+    await ensureFirebaseReady(cfg);
+    const db = firebase.firestore();
+    const snap = await db.collection('taskchain_projects').doc(cfg.docId).get();
+    if (!snap.exists) {
+      setFirebaseStatus(`No document named "${cfg.docId}" was found in this Firebase project.`, true);
+      return;
+    }
+    const data = snap.data();
+    const parsed = JSON.parse(data.json);
+    if (!Array.isArray(parsed.tasks)) throw new Error('the stored document is not a valid TaskChain project');
+    parsed.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; });
+    state = parsed;
+    saveState();
+    renderAll();
+    setFirebaseStatus(`Loaded "${cfg.docId}" from Firebase.`, false);
+    toast('Project loaded from Firebase.');
+    closeFirebaseModal();
+  } catch (e) {
+    setFirebaseStatus('Load failed: ' + (e.message || e), true);
+  }
+}
+
+function openFirebaseModal() {
+  fillFirebaseForm(getStoredFirebaseConfig());
+  setFirebaseStatus('', false);
+  document.getElementById('firebaseModalOverlay').classList.add('open');
+}
+function closeFirebaseModal() {
+  document.getElementById('firebaseModalOverlay').classList.remove('open');
+}
+
+/* =========================================================
    EXAMPLE DATA
    Demonstrates: explicit deadlines, a calculated (derived) deadline
    on a parent task with none of its own, multiple parents, and a
@@ -1029,6 +1253,19 @@ function initToolbar() {
     saveState();
   };
 
+  document.getElementById('btnFirebase').onclick = openFirebaseModal;
+  document.getElementById('firebaseModalClose').onclick = closeFirebaseModal;
+  document.getElementById('firebaseModalOverlay').addEventListener('click', e => {
+    if (e.target.id === 'firebaseModalOverlay') closeFirebaseModal();
+  });
+  document.getElementById('fbSaveBtn').onclick = handleFirebaseSave;
+  document.getElementById('fbLoadBtn').onclick = handleFirebaseLoad;
+  document.getElementById('fbForget').onclick = () => {
+    localStorage.removeItem(FIREBASE_CONFIG_KEY);
+    fillFirebaseForm(null);
+    setFirebaseStatus('Saved connection settings removed from this browser.', false);
+  };
+
   document.getElementById('btnZoomIn').onclick = () => {
     ui.zoomIndex = Math.min(ZOOM_LEVELS.length - 1, ui.zoomIndex + 1);
     renderTimeline();
@@ -1106,6 +1343,7 @@ function initModal() {
       closeTaskModal();
       document.getElementById('confirmOverlay').classList.remove('open');
       document.getElementById('statusChangeOverlay').classList.remove('open');
+      closeFirebaseModal();
     }
   });
 }

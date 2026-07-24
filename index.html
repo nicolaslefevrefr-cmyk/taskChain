@@ -30,6 +30,7 @@
         <button class="btn btn-ghost" id="btnImport" title="Load a JSON file">Load JSON</button>
         <input type="file" id="fileImport" accept="application/json" hidden>
         <button class="btn btn-ghost" id="btnExport" title="Save as JSON">Export JSON</button>
+        <button class="btn btn-ghost" id="btnFirebase" title="Save or load this project from Firebase">☁ Firebase</button>
         <button class="btn btn-ghost" id="btnReset" title="Start a new empty project">New</button>
       </div>
       <button class="btn btn-primary" id="btnNewTask">+ New task</button>
@@ -86,7 +87,7 @@
     <!-- ===================== TAB: TREE ===================== -->
     <section class="tab-panel" id="panel-tree">
       <div class="panel-toolbar">
-        <p class="panel-hint">A <strong>parent</strong> task must finish before its <strong>child</strong> tasks can start. Changing a parent's status can cascade to its children. A dashed orange outline flags a task that is not yet Released while one of its descendants already is.</p>
+        <p class="panel-hint">A <strong>parent</strong> task must finish before its <strong>child</strong> tasks can start. Changing a parent's status can cascade to its children. A dashed orange outline flags a task that is not yet Released while one of its descendants already is. A task with several parents is shown in full under its first parent; its other parents show a linked reference (<strong>↳</strong>) — click it to jump straight to the full entry.</p>
         <div class="btn-group">
           <button class="btn btn-ghost btn-sm" id="btnExpandAll">Expand all</button>
           <button class="btn btn-ghost btn-sm" id="btnCollapseAll">Collapse all</button>
@@ -236,6 +237,47 @@
       <p id="confirmMessage"></p>
     </div>
     <div class="modal-footer" id="confirmButtons"></div>
+  </div>
+</div>
+
+<!-- ===================== FIREBASE SYNC MODAL ===================== -->
+<div class="modal-overlay" id="firebaseModalOverlay">
+  <div class="modal modal-firebase">
+    <div class="modal-header">
+      <h2>Firebase sync</h2>
+      <button class="modal-close" id="firebaseModalClose">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p class="panel-hint" style="margin-bottom:16px;">Paste your Firebase Web app config below (see the README for setup steps). These values aren't secret — access is controlled by your Firestore security rules, not by hiding this config.</p>
+
+      <div class="form-row-split">
+        <div class="form-row"><label for="fbApiKey">API key</label><input type="text" id="fbApiKey" placeholder="AIza…"></div>
+        <div class="form-row"><label for="fbAuthDomain">Auth domain</label><input type="text" id="fbAuthDomain" placeholder="my-project.firebaseapp.com"></div>
+      </div>
+      <div class="form-row-split">
+        <div class="form-row"><label for="fbProjectId">Project ID</label><input type="text" id="fbProjectId" placeholder="my-project"></div>
+        <div class="form-row"><label for="fbStorageBucket">Storage bucket</label><input type="text" id="fbStorageBucket" placeholder="my-project.appspot.com"></div>
+      </div>
+      <div class="form-row-split">
+        <div class="form-row"><label for="fbMessagingSenderId">Messaging sender ID</label><input type="text" id="fbMessagingSenderId" placeholder="123456789"></div>
+        <div class="form-row"><label for="fbAppId">App ID</label><input type="text" id="fbAppId" placeholder="1:123:web:abc"></div>
+      </div>
+      <div class="form-row">
+        <label for="fbDocId">Document name <span class="label-hint">(identifies this project in Firestore — pick something hard to guess)</span></label>
+        <input type="text" id="fbDocId" placeholder="e.g. acme-widget-plan-8k2">
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" id="fbRememberConfig" checked> Remember these settings in this browser</label>
+      </div>
+      <p class="field-note" id="fbStatus"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger-ghost" id="fbForget" title="Remove saved connection settings from this browser">Forget settings</button>
+      <div class="modal-footer-right">
+        <button class="btn btn-ghost" id="fbLoadBtn">Load from Firebase</button>
+        <button class="btn btn-primary" id="fbSaveBtn">Save to Firebase</button>
+      </div>
+    </div>
   </div>
 </div>
 
