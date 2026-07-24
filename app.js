@@ -14,11 +14,18 @@ const STATUS_META = {
 
 const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
 const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagram scale
-const STORAGE_KEY = 'taskchain_state_v2';
-const APP_VERSION = 'v1.3';
+const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
+const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
+const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
+const APP_VERSION = 'v1.4';
 
-/* ---------- State ---------- */
-let state = loadState() || createEmptyState();
+/* ---------- State ----------
+   `workspace` holds every project; `state` is always a direct reference
+   to the currently active project inside workspace.projects, so every
+   existing function that reads/writes state.tasks, state.meta, etc.
+   keeps working unchanged — switching projects just repoints `state`. */
+let workspace = loadWorkspace() || createDefaultWorkspace();
+let state = getActiveProject();
 let ui = {
   activeTab: 'list',
   search: '',
@@ -30,12 +37,23 @@ let ui = {
   treeZoomIndex: 3,
 };
 
-function createEmptyState() {
+function generateProjectId() {
+  return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+function createEmptyProject(name) {
   return {
-    meta: { projectName: 'Untitled project', lastModified: nowISO() },
+    id: generateProjectId(),
+    meta: { projectName: name || 'Untitled project', lastModified: nowISO() },
     tasks: [],
     nextIdNum: 1,
   };
+}
+function createDefaultWorkspace() {
+  const p = createEmptyProject('Untitled project');
+  return { projects: [p], activeProjectId: p.id };
+}
+function getActiveProject() {
+  return workspace.projects.find(p => p.id === workspace.activeProjectId) || workspace.projects[0];
 }
 
 function nowISO() { return new Date().toISOString(); }
@@ -47,20 +65,59 @@ function todayStr() {
 /* =========================================================
    PERSISTENCE
    ========================================================= */
-function loadState() {
+function normalizeProject(p) {
+  p.tasks = p.tasks || [];
+  p.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; });
+  if (!p.meta) p.meta = { projectName: 'Imported project', lastModified: nowISO() };
+  if (!p.meta.projectName) p.meta.projectName = 'Imported project';
+  if (!p.nextIdNum) {
+    const maxN = p.tasks.reduce((m, t) => {
+      const n = parseInt(String(t.id).split('-')[1], 10);
+      return isNaN(n) ? m : Math.max(m, n);
+    }, 0);
+    p.nextIdNum = maxN + 1;
+  }
+  if (!p.id) p.id = generateProjectId();
+  return p;
+}
+
+function normalizeWorkspace(w) {
+  w.projects = (w.projects || []).map(normalizeProject);
+  if (!w.projects.length) w.projects.push(createEmptyProject('Untitled project'));
+  if (!w.activeProjectId || !w.projects.some(p => p.id === w.activeProjectId)) {
+    w.activeProjectId = w.projects[0].id;
+  }
+  return w;
+}
+
+function loadWorkspace() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed.tasks) return null;
-    return parsed;
-  } catch (e) { return null; }
+    const raw = localStorage.getItem(WORKSPACE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.projects) && parsed.projects.length) return normalizeWorkspace(parsed);
+    }
+  } catch (e) { /* fall through to migration */ }
+
+  // One-time migration from the old single-project storage format.
+  try {
+    const legacyRaw = localStorage.getItem(STORAGE_KEY);
+    if (legacyRaw) {
+      const legacy = JSON.parse(legacyRaw);
+      if (legacy && Array.isArray(legacy.tasks)) {
+        normalizeProject(legacy);
+        return { projects: [legacy], activeProjectId: legacy.id };
+      }
+    }
+  } catch (e) { /* ignore, fall through to a fresh workspace */ }
+
+  return null;
 }
 
 function saveState() {
   state.meta.lastModified = nowISO();
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace));
     document.getElementById('saveIndicator').textContent = 'Saved';
   } catch (e) { /* storage unavailable — ignore silently */ }
 }
@@ -401,6 +458,149 @@ function showConfirm(message, buttons) {
     });
     overlay.classList.add('open');
   });
+}
+
+function showPrompt(message, defaultValue) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('promptOverlay');
+    document.getElementById('promptMessage').textContent = message;
+    const input = document.getElementById('promptInput');
+    input.value = defaultValue || '';
+    const cleanup = (result) => { overlay.classList.remove('open'); resolve(result); };
+    document.getElementById('promptCancel').onclick = () => cleanup(null);
+    document.getElementById('promptConfirm').onclick = () => cleanup(input.value);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
+    input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); cleanup(input.value); } };
+    overlay.classList.add('open');
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
+
+/* =========================================================
+   PROJECTS (workspace sidebar)
+   Every project is a self-contained object with its own tasks,
+   exactly like the old single-project `state` shape, just tagged with
+   an id and kept in workspace.projects. Switching projects repoints
+   the shared `state` reference, so the rest of the app (list, tree,
+   planning, modals...) needs no awareness of multi-project support.
+   ========================================================= */
+function switchToProject(id) {
+  const target = workspace.projects.find(p => p.id === id);
+  if (!target || target === state) return;
+  workspace.activeProjectId = id;
+  state = target;
+  saveState();
+  renderAll();
+}
+
+async function handleNewProject() {
+  const name = await showPrompt('Name this project', 'Untitled project');
+  if (name === null) return;
+  const p = createEmptyProject(name.trim() || 'Untitled project');
+  workspace.projects.push(p);
+  switchToProject(p.id);
+  toast(`Project "${p.meta.projectName}" created.`);
+}
+
+function handleDuplicateProject(id) {
+  const src = workspace.projects.find(p => p.id === id);
+  if (!src) return;
+  const clone = JSON.parse(JSON.stringify(src));
+  clone.id = generateProjectId();
+  clone.meta.projectName = `${src.meta.projectName} (copy)`;
+  clone.meta.lastModified = nowISO();
+  workspace.projects.splice(workspace.projects.indexOf(src) + 1, 0, clone);
+  switchToProject(clone.id);
+  toast(`Duplicated as "${clone.meta.projectName}".`);
+}
+
+async function handleRenameProject(id) {
+  const p = workspace.projects.find(x => x.id === id);
+  if (!p) return;
+  const name = await showPrompt('Rename project', p.meta.projectName);
+  if (name === null) return;
+  p.meta.projectName = name.trim() || p.meta.projectName;
+  p.meta.lastModified = nowISO();
+  saveState();
+  if (p.id === workspace.activeProjectId) document.getElementById('projectNameInput').value = p.meta.projectName;
+  renderSidebar();
+}
+
+async function handleDeleteProject(id) {
+  const p = workspace.projects.find(x => x.id === id);
+  if (!p) return;
+  const choice = await showConfirm(
+    `Permanently delete project "${p.meta.projectName}" (${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'})? This can't be undone unless you've exported it.`,
+    [
+      { label: 'Cancel', value: 'cancel' },
+      { label: 'Delete', value: 'delete', danger: true, primary: true },
+    ]
+  );
+  if (choice !== 'delete') return;
+
+  const idx = workspace.projects.indexOf(p);
+  workspace.projects.splice(idx, 1);
+  if (!workspace.projects.length) workspace.projects.push(createEmptyProject('Untitled project'));
+
+  if (workspace.activeProjectId === id) {
+    const next = workspace.projects[Math.max(0, idx - 1)] || workspace.projects[0];
+    workspace.activeProjectId = next.id;
+    state = next;
+  }
+  saveState();
+  renderAll();
+  toast('Project deleted.');
+}
+
+function renderSidebar() {
+  const list = document.getElementById('sidebarProjectList');
+  const sorted = workspace.projects.slice().sort((a, b) =>
+    (b.meta.lastModified || '').localeCompare(a.meta.lastModified || ''));
+
+  list.innerHTML = sorted.map(p => {
+    const active = p.id === workspace.activeProjectId;
+    const count = p.tasks.length;
+    return `<div class="sidebar-project-item${active ? ' active' : ''}" data-id="${p.id}">
+      <div class="sidebar-project-info">
+        <div class="sidebar-project-name" title="${escapeAttr(p.meta.projectName)}">${escapeHtml(p.meta.projectName)}</div>
+        <div class="sidebar-project-meta">${count} task${count === 1 ? '' : 's'}</div>
+      </div>
+      <div class="sidebar-project-actions">
+        <button data-action="rename" title="Rename">✏</button>
+        <button data-action="duplicate" title="Duplicate">⧉</button>
+        <button data-action="export" title="Export this project as JSON">⬇</button>
+        <button data-action="delete" title="Delete">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.sidebar-project-item').forEach(row => {
+    const id = row.dataset.id;
+    row.addEventListener('click', (e) => {
+      const actionBtn = e.target.closest('[data-action]');
+      if (!actionBtn) { switchToProject(id); return; }
+      e.stopPropagation();
+      const action = actionBtn.dataset.action;
+      if (action === 'rename') handleRenameProject(id);
+      else if (action === 'duplicate') handleDuplicateProject(id);
+      else if (action === 'delete') handleDeleteProject(id);
+      else if (action === 'export') {
+        const p = workspace.projects.find(x => x.id === id);
+        if (p) exportProjectJSON(p);
+      }
+    });
+  });
+}
+
+function initSidebar() {
+  const sidebarEl = document.getElementById('sidebar');
+  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true') sidebarEl.classList.add('collapsed');
+  document.getElementById('btnSidebarToggle').onclick = () => {
+    sidebarEl.classList.toggle('collapsed');
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarEl.classList.contains('collapsed'));
+  };
+  document.getElementById('btnNewProject').onclick = handleNewProject;
+  renderSidebar();
 }
 
 /* =========================================================
@@ -1038,18 +1238,31 @@ function renderAll() {
   renderTree();
   renderKanban();
   renderTimeline();
+  renderSidebar();
   document.getElementById('projectNameInput').value = state.meta.projectName;
 }
 
 /* =========================================================
    IMPORT / EXPORT
    ========================================================= */
-function exportJSON() {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+function exportWorkspaceJSON() {
+  const blob = new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const safeName = (state.meta.projectName || 'project').trim().replace(/[^a-z0-9\-_]+/gi, '_').toLowerCase() || 'project';
+  a.download = `taskchain_workspace_${workspace.projects.length}projects.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportProjectJSON(project) {
+  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeName = (project.meta.projectName || 'project').trim().replace(/[^a-z0-9\-_]+/gi, '_').toLowerCase() || 'project';
   a.download = `taskchain_${safeName}.json`;
   document.body.appendChild(a);
   a.click();
@@ -1059,26 +1272,34 @@ function exportJSON() {
 
 function importJSONFile(file) {
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const parsed = JSON.parse(reader.result);
-      if (!Array.isArray(parsed.tasks)) throw new Error('invalid format');
-      parsed.tasks.forEach(t => {
-        t.parents = t.parents || [];
-        t.history = t.history || [];
-      });
-      if (!parsed.nextIdNum) {
-        const maxN = parsed.tasks.reduce((m, t) => {
-          const n = parseInt(String(t.id).split('-')[1], 10);
-          return isNaN(n) ? m : Math.max(m, n);
-        }, 0);
-        parsed.nextIdNum = maxN + 1;
+      if (Array.isArray(parsed.projects) && parsed.projects.length) {
+        // Whole-workspace file: replacing everything is destructive, confirm first.
+        const choice = await showConfirm(
+          `This file contains ${parsed.projects.length} project(s). Loading it will replace your entire local workspace (all current projects). Continue?`,
+          [
+            { label: 'Cancel', value: 'no' },
+            { label: 'Replace workspace', value: 'yes', danger: true, primary: true },
+          ]
+        );
+        if (choice !== 'yes') return;
+        workspace = normalizeWorkspace(parsed);
+        state = getActiveProject();
+        saveState();
+        renderAll();
+        toast('Workspace loaded.');
+      } else if (Array.isArray(parsed.tasks)) {
+        // Single-project file: add it alongside existing projects, no data loss.
+        normalizeProject(parsed);
+        parsed.id = generateProjectId();
+        workspace.projects.push(parsed);
+        switchToProject(parsed.id);
+        toast(`Imported as new project "${parsed.meta.projectName}".`);
+      } else {
+        throw new Error('invalid format');
       }
-      if (!parsed.meta) parsed.meta = { projectName: 'Imported project', lastModified: nowISO() };
-      state = parsed;
-      saveState();
-      renderAll();
-      toast('Project loaded.');
     } catch (e) {
       toast('Invalid JSON file.');
     }
@@ -1188,12 +1409,12 @@ async function handleFirebaseSave() {
     await ensureFirebaseReady(cfg);
     const db = firebase.firestore();
     await db.collection('taskchain_projects').doc(cfg.docId).set({
-      json: JSON.stringify(state),
-      projectName: state.meta.projectName,
+      json: JSON.stringify(workspace),
+      projectCount: workspace.projects.length,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
-    setFirebaseStatus(`Saved to Firebase as "${cfg.docId}".`, false);
-    toast('Project saved to Firebase.');
+    setFirebaseStatus(`Saved ${workspace.projects.length} project(s) to Firebase as "${cfg.docId}".`, false);
+    toast('Workspace saved to Firebase.');
   } catch (e) {
     setFirebaseStatus('Save failed: ' + (e.message || e), true);
   }
@@ -1217,13 +1438,22 @@ async function handleFirebaseLoad() {
     }
     const data = snap.data();
     const parsed = JSON.parse(data.json);
-    if (!Array.isArray(parsed.tasks)) throw new Error('the stored document is not a valid TaskChain project');
-    parsed.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; });
-    state = parsed;
+    let newWorkspace;
+    if (Array.isArray(parsed.projects) && parsed.projects.length) {
+      newWorkspace = normalizeWorkspace(parsed);
+    } else if (Array.isArray(parsed.tasks)) {
+      // Backward compatible with docs saved by an earlier single-project version.
+      normalizeProject(parsed);
+      newWorkspace = { projects: [parsed], activeProjectId: parsed.id };
+    } else {
+      throw new Error('the stored document is not a valid TaskChain workspace or project');
+    }
+    workspace = newWorkspace;
+    state = getActiveProject();
     saveState();
     renderAll();
-    setFirebaseStatus(`Loaded "${cfg.docId}" from Firebase.`, false);
-    toast('Project loaded from Firebase.');
+    setFirebaseStatus(`Loaded ${workspace.projects.length} project(s) from "${cfg.docId}".`, false);
+    toast('Workspace loaded from Firebase.');
     closeFirebaseModal();
   } catch (e) {
     setFirebaseStatus('Load failed: ' + (e.message || e), true);
@@ -1250,7 +1480,8 @@ function closeFirebaseModal() {
    ========================================================= */
 function loadExampleData() {
   const t = todayStr();
-  state = {
+  const project = {
+    id: generateProjectId(),
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
     nextIdNum: 7,
     tasks: [
@@ -1295,9 +1526,9 @@ function loadExampleData() {
       },
     ],
   };
-  saveState();
-  renderAll();
-  toast('Example loaded.');
+  workspace.projects.push(project);
+  switchToProject(project.id);
+  toast('Example project added.');
 }
 
 /* =========================================================
@@ -1327,27 +1558,24 @@ function initToolbar() {
   document.getElementById('btnNewTask').onclick = () => openTaskModal(null);
   document.getElementById('btnEmptyNewTask').onclick = () => openTaskModal(null);
 
-  document.getElementById('btnExport').onclick = exportJSON;
+  document.getElementById('btnExport').onclick = exportWorkspaceJSON;
   document.getElementById('btnImport').onclick = () => document.getElementById('fileImport').click();
   document.getElementById('fileImport').onchange = e => {
     if (e.target.files[0]) importJSONFile(e.target.files[0]);
     e.target.value = '';
   };
-  document.getElementById('btnLoadExample').onclick = async () => {
-    if (state.tasks.length) {
-      const choice = await showConfirm('Loading the example will replace the current project. Continue?', [
-        { label: 'Cancel', value: 'no' }, { label: 'Load example', value: 'yes', primary: true },
-      ]);
-      if (choice !== 'yes') return;
-    }
-    loadExampleData();
-  };
+  document.getElementById('btnLoadExample').onclick = () => loadExampleData();
   document.getElementById('btnReset').onclick = async () => {
-    const choice = await showConfirm('Start a new empty project? Any unexported changes will be lost.', [
-      { label: 'Cancel', value: 'no' }, { label: 'New project', value: 'yes', danger: true, primary: true },
-    ]);
+    const choice = await showConfirm(
+      `Remove all tasks from "${state.meta.projectName}"? The project itself is kept — this only clears its tasks. Any unexported changes will be lost.`,
+      [
+        { label: 'Cancel', value: 'no' },
+        { label: 'Clear tasks', value: 'yes', danger: true, primary: true },
+      ]
+    );
     if (choice !== 'yes') return;
-    state = createEmptyState();
+    state.tasks = [];
+    state.nextIdNum = 1;
     saveState();
     renderAll();
   };
@@ -1355,6 +1583,7 @@ function initToolbar() {
   document.getElementById('projectNameInput').oninput = e => {
     state.meta.projectName = e.target.value;
     saveState();
+    renderSidebar();
   };
 
   document.getElementById('btnFirebase').onclick = openFirebaseModal;
@@ -1455,6 +1684,7 @@ function initModal() {
       closeTaskModal();
       document.getElementById('confirmOverlay').classList.remove('open');
       document.getElementById('statusChangeOverlay').classList.remove('open');
+      document.getElementById('promptOverlay').classList.remove('open');
       closeFirebaseModal();
     }
   });
@@ -1467,6 +1697,7 @@ function init() {
   initListFilters();
   initTreeControls();
   initModal();
+  initSidebar();
   renderAll();
 }
 

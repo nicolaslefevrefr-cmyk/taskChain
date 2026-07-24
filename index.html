@@ -27,25 +27,40 @@
     <div class="topbar-right">
       <span id="saveIndicator" class="save-indicator">Saved</span>
       <div class="btn-group">
-        <button class="btn btn-ghost" id="btnLoadExample" title="Load a sample project">Example</button>
-        <button class="btn btn-ghost" id="btnImport" title="Load a JSON file">Load JSON</button>
+        <button class="btn btn-ghost" id="btnLoadExample" title="Add a sample project to your project list">Example</button>
+        <button class="btn btn-ghost" id="btnImport" title="Load a project or a whole workspace JSON file">Load JSON</button>
         <input type="file" id="fileImport" accept="application/json" hidden>
-        <button class="btn btn-ghost" id="btnExport" title="Save as JSON">Export JSON</button>
-        <button class="btn btn-ghost" id="btnFirebase" title="Save or load this project from Firebase">☁ Firebase</button>
-        <button class="btn btn-ghost" id="btnReset" title="Start a new empty project">New</button>
+        <button class="btn btn-ghost" id="btnExport" title="Save your whole workspace (all projects) as JSON">Export JSON</button>
+        <button class="btn btn-ghost" id="btnFirebase" title="Save or load your whole workspace from Firebase">☁ Firebase</button>
+        <button class="btn btn-ghost" id="btnReset" title="Remove all tasks from this project (keeps the project itself)">Clear tasks</button>
       </div>
       <button class="btn btn-primary" id="btnNewTask">+ New task</button>
     </div>
   </header>
 
-  <!-- ===================== TABS ===================== -->
-  <nav class="tabbar">
-    <button class="tab-btn active" data-tab="list">List</button>
-    <button class="tab-btn" data-tab="tree">Tree</button>
-    <button class="tab-btn" data-tab="planning">Planning</button>
-  </nav>
+  <div class="app-body">
 
-  <main class="content">
+    <!-- ===================== SIDEBAR: PROJECTS ===================== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-header-label">Projects</span>
+        <button class="sidebar-toggle-btn" id="btnSidebarToggle" title="Collapse/expand the project list">«</button>
+      </div>
+      <div class="sidebar-list" id="sidebarProjectList"></div>
+      <div class="sidebar-footer">
+        <button class="btn btn-primary btn-sm sidebar-footer-label" id="btnNewProject" style="width:100%;">+ New project</button>
+      </div>
+    </aside>
+
+    <div class="main-area">
+      <!-- ===================== TABS ===================== -->
+      <nav class="tabbar">
+        <button class="tab-btn active" data-tab="list">List</button>
+        <button class="tab-btn" data-tab="tree">Tree</button>
+        <button class="tab-btn" data-tab="planning">Planning</button>
+      </nav>
+
+      <main class="content">
 
     <!-- ===================== TAB: LIST ===================== -->
     <section class="tab-panel active" id="panel-list">
@@ -124,7 +139,9 @@
       </div>
     </section>
 
-  </main>
+      </main>
+    </div>
+  </div>
 </div>
 
 <!-- ===================== TASK MODAL ===================== -->
@@ -252,7 +269,7 @@
       <button class="modal-close" id="firebaseModalClose">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="panel-hint" style="margin-bottom:16px;">Paste your Firebase Web app config below (see the README for setup steps). These values aren't secret — access is controlled by your Firestore security rules, not by hiding this config.</p>
+      <p class="panel-hint" style="margin-bottom:16px;">Paste your Firebase Web app config below (see the README for setup steps). Saving/loading always covers your <strong>whole workspace</strong> (every project in the sidebar), stored as one Firestore document. These values aren't secret — access is controlled by your Firestore security rules, not by hiding this config.</p>
 
       <div class="form-row-split">
         <div class="form-row"><label for="fbApiKey">API key</label><input type="text" id="fbApiKey" placeholder="AIza…"></div>
@@ -267,7 +284,7 @@
         <div class="form-row"><label for="fbAppId">App ID</label><input type="text" id="fbAppId" placeholder="1:123:web:abc"></div>
       </div>
       <div class="form-row">
-        <label for="fbDocId">Document name <span class="label-hint">(identifies this project in Firestore — pick something hard to guess)</span></label>
+        <label for="fbDocId">Document name <span class="label-hint">(identifies this workspace in Firestore — pick something hard to guess)</span></label>
         <input type="text" id="fbDocId" placeholder="e.g. acme-widget-plan-8k2">
       </div>
       <div class="form-row">
@@ -280,6 +297,22 @@
       <div class="modal-footer-right">
         <button class="btn btn-ghost" id="fbLoadBtn">Load from Firebase</button>
         <button class="btn btn-primary" id="fbSaveBtn">Save to Firebase</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== TEXT PROMPT MODAL ===================== -->
+<div class="modal-overlay" id="promptOverlay">
+  <div class="modal modal-confirm">
+    <div class="modal-body">
+      <p id="promptMessage"></p>
+      <input type="text" id="promptInput">
+    </div>
+    <div class="modal-footer">
+      <div class="modal-footer-right">
+        <button class="btn btn-ghost" id="promptCancel">Cancel</button>
+        <button class="btn btn-primary" id="promptConfirm">OK</button>
       </div>
     </div>
   </div>

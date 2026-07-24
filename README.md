@@ -4,6 +4,7 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 
 ## Features
 
+- **Multiple projects**: a collapsible sidebar on the left lists every project you're working on. Create new ones, switch between them, rename, duplicate, or delete them, and export any single one as its own JSON file — all from the sidebar. Each project has its own independent set of tasks; nothing is shared between them except the workspace they live in.
 - **Tasks**: title, link, status (`Working`, `In Release Process`, `Released`, `Rework`), deadline, duration (business days), history (date + note), automatic ID (`T-1`, `T-2`, …).
 - **Parent → child links**: a task can depend on one or more parent tasks (which must finish before it can start).
 - **Status changes go through a dedicated modal**: every status change (drag-and-drop or the edit form) opens a small dialog to log a date-stamped reason and, if relevant, cascade the change to child tasks.
@@ -17,8 +18,8 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 - **Chain-aware scheduling ("retro-planning") built into the Planning tab**: a task doesn't need its own deadline to appear on the timeline. Dates propagate through the whole dependency graph in **both directions**, repeatedly, until nothing changes — a task with children but no deadline of its own gets one calculated backward from them, and a task with no deadline or children of its own can still get scheduled *forward* the moment one of its parents becomes known. Solving one task's date this way can be exactly what unlocks a sibling or a task further along the chain, so the app re-passes over the whole project until it reaches a fixed point instead of computing everything in one shot. Calculated dates show as dashed bars on the timeline and in gray in the List/edit-modal. If a task's own deadline is later than what its descendants require, it's flagged as a conflict (red outline / warning icon).
 - **Weekends are excluded** from every date calculation (durations, calculated deadlines, bar lengths), and a bar that spans a weekend is visually **split in two** (with a thin connector) rather than drawn as one continuous rectangle, so the pause is obvious at a glance.
 - **Timeline controls**: zoom in/out buttons to change the day granularity (bars hide their inner text when they get too small), light vertical lines separating each week, and weekend columns lightly shaded.
-- **JSON save/load**: export/import a `.json` file with the whole project. A local autosave (`localStorage`) also protects your work between sessions in the same browser.
-- **Firebase sync** (optional): the "☁ Firebase" button opens a modal to save/load the whole project as JSON to/from your own Firebase project (Firestore). See [Setting up Firebase](#setting-up-firebase) below.
+- **JSON save/load**: "Export JSON" in the header saves your **whole workspace** (every project) as one `.json` file; "Load JSON" accepts either that same whole-workspace format (replaces everything, with a confirmation) or a single project's file (added alongside your existing projects, nothing is overwritten). Each sidebar project also has its own "⬇" icon to export just that one project. A local autosave (`localStorage`) also protects your work between sessions in the same browser.
+- **Firebase sync** (optional): the "☁ Firebase" button opens a modal to save/load your **whole workspace** (every project) to/from your own Firebase project (Firestore), as one document. See [Setting up Firebase](#setting-up-firebase) below.
 - A small version badge next to the app name (e.g. `v1.2`) is bumped on each round of changes, so you can tell builds apart at a glance.
 - Clean, light, no-nonsense theme.
 
@@ -34,34 +35,43 @@ Just open `index.html` in a browser — no install, no server needed.
 
 ## JSON file format
 
+A **whole-workspace** export (from the header's "Export JSON") looks like:
 ```json
 {
-  "meta": { "projectName": "My project", "lastModified": "2026-07-23T10:00:00.000Z" },
-  "nextIdNum": 3,
-  "tasks": [
+  "activeProjectId": "p1a2b3c4",
+  "projects": [
     {
-      "id": "T-1",
-      "title": "Component design",
-      "link": "https://example.com",
-      "status": "working",
-      "deadline": null,
-      "duration": 5,
-      "parents": [],
-      "history": [{ "date": "2026-07-01", "note": "Task created" }]
-    },
-    {
-      "id": "T-2",
-      "title": "Component calculations",
-      "status": "released",
-      "deadline": "2026-08-05",
-      "duration": 4,
-      "parents": ["T-1"],
-      "history": []
+      "id": "p1a2b3c4",
+      "meta": { "projectName": "My project", "lastModified": "2026-07-23T10:00:00.000Z" },
+      "nextIdNum": 3,
+      "tasks": [
+        {
+          "id": "T-1",
+          "title": "Component design",
+          "link": "https://example.com",
+          "status": "working",
+          "deadline": null,
+          "duration": 5,
+          "parents": [],
+          "history": [{ "date": "2026-07-01", "note": "Task created" }]
+        },
+        {
+          "id": "T-2",
+          "title": "Component calculations",
+          "status": "released",
+          "deadline": "2026-08-05",
+          "duration": 4,
+          "parents": ["T-1"],
+          "history": []
+        }
+      ]
     }
   ]
 }
 ```
-In this example `T-2` has an explicit deadline; `T-1` has none, so the app automatically calculates one for it (business days only) from `T-2`'s deadline and duration.
+A **single-project** export (from a project's "⬇" icon in the sidebar) is just one entry from that `projects` array on its own (with `id`, `meta`, `nextIdNum`, `tasks`) — this is also the older format used before multi-project support, so old exports still import fine (as a new project added to your workspace).
+
+In the example above `T-2` has an explicit deadline; `T-1` has none, so the app automatically calculates one for it (business days only) from `T-2`'s deadline and duration.
 
 ## Setting up Firebase
 
@@ -105,7 +115,7 @@ service cloud.firestore {
 Then click **Publish**.
 
 **6. Pick a document name**
-In the app's Firebase modal, the "Document name" field is the ID of the Firestore document your project is stored under (inside the `taskchain_projects` collection). Anyone with your Firebase config *and* this exact document name can read/write that document, so pick something unlikely to be guessed (e.g. `acme-widget-plan-8k2`) rather than something short like `project1`.
+In the app's Firebase modal, the "Document name" field is the ID of the Firestore document your **whole workspace** (every project) is stored under (inside the `taskchain_projects` collection). Anyone with your Firebase config *and* this exact document name can read/write that document, so pick something unlikely to be guessed (e.g. `acme-widget-plan-8k2`) rather than something short like `project1`.
 
 **A note on security**: a Firebase web config (the six values above) is not a secret the way an API key on a server would be — it's normal for it to be visible in a public site's source, and Google's own docs say so. Real access control comes from the security rules in step 5. The rule above lets *any* anonymously-authenticated visitor read/write *any* document in `taskchain_projects`, which combined with a hard-to-guess document name is reasonable for personal or small-team use, but is not equivalent to a real login system. If you need stronger guarantees (e.g. only specific people can access a given project), you would need to replace anonymous sign-in with real user accounts and rules keyed to `request.auth.uid` — that's outside the scope of this simple version.
 
