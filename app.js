@@ -12,8 +12,10 @@ const STATUS_META = {
   rework:          { label: 'Rework' },
 };
 
-const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day
+const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
+const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagram scale
 const STORAGE_KEY = 'taskchain_state_v2';
+const APP_VERSION = 'v1.2';
 
 /* ---------- State ---------- */
 let state = loadState() || createEmptyState();
@@ -21,11 +23,11 @@ let ui = {
   activeTab: 'list',
   search: '',
   statusFilter: 'all',
-  collapsedNodes: new Set(),
   editingTaskId: null,
   draftHistory: [],
   dragTaskId: null,
   zoomIndex: 4,
+  treeZoomIndex: 3,
 };
 
 function createEmptyState() {
@@ -37,7 +39,10 @@ function createEmptyState() {
 }
 
 function nowISO() { return new Date().toISOString(); }
-function todayStr() { return new Date().toISOString().slice(0, 10); }
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 /* =========================================================
    PERSISTENCE
@@ -62,23 +67,36 @@ function saveState() {
 
 /* =========================================================
    DATE HELPERS — calendar days (for pixel positioning)
+   All parsing/formatting stays in LOCAL calendar time (no toISOString
+   round-trips): toISOString() converts through UTC, which silently
+   shifts a date by one day in any timezone ahead of UTC. That was the
+   root cause of dates drifting near weekends.
    ========================================================= */
+function parseDateLocal(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+function formatDateLocal(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 function addDays(dateStr, days) {
-  const d = new Date(dateStr + 'T00:00:00');
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const dt = parseDateLocal(dateStr);
+  dt.setDate(dt.getDate() + days);
+  return formatDateLocal(dt);
 }
 function daysBetween(a, b) {
-  const d1 = new Date(a + 'T00:00:00');
-  const d2 = new Date(b + 'T00:00:00');
+  const d1 = parseDateLocal(a);
+  const d2 = parseDateLocal(b);
   return Math.round((d2 - d1) / 86400000);
 }
 function formatDate(dateStr) {
   if (!dateStr) return '—';
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  return parseDateLocal(dateStr).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
-function dayOfWeek(dateStr) { return new Date(dateStr + 'T00:00:00').getDay(); } // 0=Sun..6=Sat
+function dayOfWeek(dateStr) { return parseDateLocal(dateStr).getDay(); } // 0=Sun..6=Sat
 function isWeekend(dateStr) { const d = dayOfWeek(dateStr); return d === 0 || d === 6; }
 
 /* =========================================================
@@ -103,6 +121,29 @@ function subtractBusinessDays(dateStr, n) {
   let d = dateStr;
   for (let i = 0; i < n; i++) d = previousBusinessDay(d);
   return d;
+}
+
+// Splits [start, finish] into the maximal runs of consecutive business
+// days it contains, so a bar spanning a weekend can be drawn as two (or
+// more) separate segments instead of one continuous rectangle.
+function computeBusinessRuns(start, finish) {
+  const runs = [];
+  let runStart = null;
+  let cur = start;
+  while (true) {
+    const weekend = isWeekend(cur);
+    if (!weekend && runStart === null) runStart = cur;
+    if (weekend && runStart !== null) {
+      runs.push([runStart, addDays(cur, -1)]);
+      runStart = null;
+    }
+    if (cur === finish) {
+      if (runStart !== null) runs.push([runStart, finish]);
+      break;
+    }
+    cur = addDays(cur, 1);
+  }
+  return runs;
 }
 
 /* =========================================================
@@ -149,66 +190,109 @@ function getAncestors(taskId, visited = new Set()) {
   return result;
 }
 
-// A task with several parents renders its full subtree only once, under
-// its "primary" parent (the first one listed). Its other parents show a
-// compact reference instead of duplicating the whole branch — see
-// renderTreeReferenceNode().
-function primaryParentId(task) {
-  return task.parents.length ? task.parents[0] : null;
-}
-
 /* =========================================================
    SCHEDULE ENGINE
    For every task computes { finish, finishSource, start, conflict }.
-   - finish comes from the task's own deadline when set ("explicit"),
-     otherwise it is inferred backward from its children's required
-     start dates ("derived") — this is the retro-planning logic,
-     now applied everywhere a chain allows it, not only to tasks that
-     already carry their own deadline.
-   - A task's own deadline that is later than what its descendants
-     require is flagged as a conflict.
+   Dates propagate in BOTH directions and the whole graph is relaxed
+   repeatedly until nothing changes:
+   - BACKWARD: a task with no deadline of its own can still get one
+     once ALL the children that depend on it have a start date —
+     its finish is then the business day right before the earliest
+     of those starts ("derived").
+   - FORWARD: once a task's finish is known (explicit or derived), any
+     child that still has no date of its own can start the next
+     business day after it.
+   Resolving one task this way can be exactly what unlocks a sibling
+   or a task further down/up the chain, so this repeats until a fixed
+   point is reached — bounded by the task count, since a task's dates
+   only ever move from "unknown" to "known" once, so this always
+   terminates even with cyclical links.
    All math is business-day aware (weekends excluded).
    ========================================================= */
 function computeSchedule() {
-  const memo = {};
-  function resolve(id, visiting) {
-    if (memo[id]) return memo[id];
-    if (visiting.has(id)) {
-      const r = { finish: null, finishSource: null, start: null, conflict: false, derivedFinish: null };
-      memo[id] = r;
-      return r;
-    }
-    visiting.add(id);
-    const task = getTask(id);
-    let derivedFinish = null;
-    for (const child of getChildren(id)) {
-      const childSched = resolve(child.id, visiting);
-      if (childSched.start) {
-        const candidate = previousBusinessDay(childSched.start);
-        if (derivedFinish === null || candidate < derivedFinish) derivedFinish = candidate;
+  const finish = {}, finishSource = {}, start = {};
+  state.tasks.forEach(t => {
+    finish[t.id] = t.deadline || null;
+    finishSource[t.id] = t.deadline ? 'explicit' : null;
+    start[t.id] = null;
+  });
+
+  const deriveStartFromFinish = (task) => {
+    if (finish[task.id] == null || start[task.id] != null) return;
+    start[task.id] = (task.duration != null && task.duration > 0)
+      ? subtractBusinessDays(finish[task.id], task.duration - 1)
+      : finish[task.id];
+  };
+  const deriveFinishFromStart = (task) => {
+    if (start[task.id] == null || finish[task.id] != null) return;
+    finish[task.id] = (task.duration != null && task.duration > 0)
+      ? addBusinessDays(start[task.id], task.duration - 1)
+      : start[task.id];
+    finishSource[task.id] = 'derived';
+  };
+
+  state.tasks.forEach(deriveStartFromFinish);
+
+  let changed = true;
+  let guard = 0;
+  const maxIterations = state.tasks.length + 5;
+  while (changed && guard < maxIterations) {
+    changed = false;
+    guard++;
+    for (const task of state.tasks) {
+      if (finish[task.id] == null) {
+        let candidate = null;
+        for (const c of getChildren(task.id)) {
+          if (start[c.id] != null) {
+            const cand = previousBusinessDay(start[c.id]);
+            if (candidate === null || cand < candidate) candidate = cand;
+          }
+        }
+        if (candidate !== null) {
+          finish[task.id] = candidate;
+          finishSource[task.id] = 'derived';
+          deriveStartFromFinish(task);
+          changed = true;
+        }
+      }
+      if (start[task.id] == null) {
+        let candidate = null;
+        for (const pid of task.parents) {
+          if (finish[pid] != null) {
+            const cand = nextBusinessDay(finish[pid]);
+            if (candidate === null || cand > candidate) candidate = cand;
+          }
+        }
+        if (candidate !== null) {
+          start[task.id] = candidate;
+          deriveFinishFromStart(task);
+          changed = true;
+        }
       }
     }
-    let finish = null, finishSource = null, conflict = false;
-    if (task.deadline) {
-      finish = task.deadline;
-      finishSource = 'explicit';
-      if (derivedFinish && derivedFinish < finish) conflict = true;
-    } else if (derivedFinish) {
-      finish = derivedFinish;
-      finishSource = 'derived';
-    }
-    let start = null;
-    if (finish) {
-      start = (task.duration != null && task.duration > 0)
-        ? subtractBusinessDays(finish, task.duration - 1)
-        : finish;
-    }
-    const result = { finish, finishSource, start, conflict, derivedFinish };
-    memo[id] = result;
-    return result;
   }
+
+  // Final pass purely to flag deadline conflicts: the tightest finish a
+  // task's children require, regardless of whether that value ended up
+  // being used (an explicit deadline always wins as the displayed date).
   const out = {};
-  state.tasks.forEach(t => { out[t.id] = resolve(t.id, new Set()); });
+  state.tasks.forEach(task => {
+    let backwardRequirement = null;
+    for (const c of getChildren(task.id)) {
+      if (start[c.id] != null) {
+        const cand = previousBusinessDay(start[c.id]);
+        if (backwardRequirement === null || cand < backwardRequirement) backwardRequirement = cand;
+      }
+    }
+    const conflict = !!(task.deadline && backwardRequirement && backwardRequirement < task.deadline);
+    out[task.id] = {
+      finish: finish[task.id],
+      finishSource: finishSource[task.id],
+      start: start[task.id],
+      conflict,
+      derivedFinish: backwardRequirement,
+    };
+  });
   return out;
 }
 
@@ -610,149 +694,139 @@ function statusBadge(status) {
 }
 
 /* =========================================================
-   RENDER: TREE
+   RENDER: TREE — node-link diagram
+   Every task is drawn exactly once as a box; an arrow is drawn from
+   every parent to every child (so a task with several parents simply
+   gets several incoming arrows — no duplication). Layout is a simple
+   layered ("Sugiyama-style") arrangement: a task's level is one more
+   than the deepest of its parents, so children always sit below every
+   parent that feeds into them; a couple of barycenter passes reorder
+   tasks within each level to reduce crossing lines. This stays
+   intentionally simple — no physics/force simulation.
    ========================================================= */
+const TREE_BOX_W = 190, TREE_BOX_H = 60, TREE_H_GAP = 34, TREE_V_GAP = 60, TREE_PAD = 32;
+
+function computeTreeLayout() {
+  const levelOf = {};
+  function level(id, visiting) {
+    if (levelOf[id] !== undefined) return levelOf[id];
+    if (visiting.has(id)) { levelOf[id] = 0; return 0; } // cycle guard
+    visiting.add(id);
+    const task = getTask(id);
+    let lvl = 0;
+    for (const pid of task.parents) {
+      if (!getTask(pid)) continue;
+      lvl = Math.max(lvl, level(pid, visiting) + 1);
+    }
+    levelOf[id] = lvl;
+    return lvl;
+  }
+  state.tasks.forEach(t => level(t.id, new Set()));
+
+  const levels = {};
+  state.tasks.forEach(t => {
+    const lvl = levelOf[t.id];
+    (levels[lvl] = levels[lvl] || []).push(t.id);
+  });
+  Object.values(levels).forEach(ids => ids.sort((a, b) => getTask(a).title.localeCompare(getTask(b).title)));
+
+  let order = {};
+  const reindex = () => { order = {}; Object.values(levels).forEach(ids => ids.forEach((id, i) => { order[id] = i; })); };
+  reindex();
+
+  function barycenterPass(topDown) {
+    const keys = Object.keys(levels).map(Number).sort((a, b) => topDown ? a - b : b - a);
+    for (const lvl of keys) {
+      const refLevel = topDown ? lvl - 1 : lvl + 1;
+      if (!levels[refLevel]) continue;
+      const scored = levels[lvl].map(id => {
+        const task = getTask(id);
+        const refs = topDown ? task.parents : getChildren(id).map(c => c.id);
+        const idx = refs.map(r => order[r]).filter(v => v !== undefined);
+        const bary = idx.length ? idx.reduce((a, b) => a + b, 0) / idx.length : order[id];
+        return { id, bary };
+      });
+      scored.sort((a, b) => a.bary - b.bary);
+      levels[lvl] = scored.map(s => s.id);
+      levels[lvl].forEach((id, i) => { order[id] = i; });
+    }
+  }
+  if (Object.keys(levels).length > 1) { barycenterPass(true); barycenterPass(false); barycenterPass(true); }
+
+  const positions = {};
+  let maxCount = 1;
+  Object.entries(levels).forEach(([lvl, ids]) => {
+    maxCount = Math.max(maxCount, ids.length);
+    ids.forEach((id, i) => { positions[id] = { level: Number(lvl), order: i, count: ids.length }; });
+  });
+  const maxLevel = Math.max(0, ...Object.keys(levels).map(Number));
+  return { positions, maxLevel, maxCount };
+}
+
 function renderTree() {
-  const wrap = document.getElementById('treeWrap');
-  const roots = state.tasks.filter(t => t.parents.length === 0)
-    .sort((a, b) => a.title.localeCompare(b.title));
-  const warnMap = computeUnreleasedParentWarnings();
+  const wrap = document.getElementById('treeCanvasWrap');
+  const canvas = document.getElementById('treeCanvas');
 
   if (!state.tasks.length) {
-    wrap.innerHTML = '<div class="empty-state"><p>No tasks to display yet.</p></div>';
-    return;
-  }
-  if (!roots.length) {
-    wrap.innerHTML = '<div class="empty-state"><p>Every task has a parent (possible cycle). Check your links.</p></div>';
+    canvas.style.transform = 'scale(1)';
+    canvas.innerHTML = '<div class="tree-empty-note">No tasks to display yet.</div>';
     return;
   }
 
-  const container = document.createElement('div');
-  container.className = 'tree-root-list';
-  roots.forEach(r => container.appendChild(renderTreeNode(r, new Set(), warnMap)));
-  wrap.innerHTML = '';
-  wrap.appendChild(container);
-}
+  const warnMap = computeUnreleasedParentWarnings();
+  const { positions, maxLevel, maxCount } = computeTreeLayout();
 
-function renderTreeNode(task, ancestryPath, warnMap) {
-  const node = document.createElement('div');
-  node.className = 'tree-node';
-  node.id = `tree-task-${task.id}`;
+  const canvasW = maxCount * (TREE_BOX_W + TREE_H_GAP) - TREE_H_GAP + TREE_PAD * 2;
+  const canvasH = (maxLevel + 1) * (TREE_BOX_H + TREE_V_GAP) - TREE_V_GAP + TREE_PAD * 2;
 
-  const allChildren = getChildren(task.id).sort((a, b) => a.title.localeCompare(b.title));
-  const primaryChildren = allChildren.filter(c => primaryParentId(c) === task.id);
-  const secondaryChildren = allChildren.filter(c => primaryParentId(c) !== task.id);
-  const collapsed = ui.collapsedNodes.has(task.id);
-  const isCycle = ancestryPath.has(task.id);
-  const hasExpandable = (primaryChildren.length || secondaryChildren.length) && !isCycle;
+  const px = (id) => TREE_PAD + positions[id].order * (TREE_BOX_W + TREE_H_GAP);
+  const py = (id) => TREE_PAD + positions[id].level * (TREE_BOX_H + TREE_V_GAP);
 
-  const row = document.createElement('div');
-  row.className = 'tree-node-row';
+  let edges = '';
+  state.tasks.forEach(t => {
+    t.parents.forEach(pid => {
+      if (!positions[pid]) return;
+      const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
+      const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
+      const midY = (y1 + y2) / 2;
+      edges += `<path class="tree-edge" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow)"></path>`;
+    });
+  });
 
-  const toggle = document.createElement('button');
-  toggle.className = 'tree-toggle' + (hasExpandable ? '' : ' leaf');
-  toggle.textContent = collapsed ? '▶' : '▼';
-  toggle.onclick = () => {
-    if (collapsed) ui.collapsedNodes.delete(task.id); else ui.collapsedNodes.add(task.id);
-    renderTree();
-  };
-  row.appendChild(toggle);
+  let boxes = '';
+  state.tasks.forEach(t => {
+    const badge = t.parents.length > 1 ? `<span class="tree-multi-badge" title="Depends on ${t.parents.length} parent tasks">⛓ ${t.parents.length}</span>` : '';
+    const warnCls = warnMap.has(t.id) ? ' warn-not-released' : '';
+    const warnTitle = warnMap.has(t.id) ? ` title="Not yet Released, but ${warnMap.get(t.id).map(c => c.id).join(', ')} already is/are."` : '';
+    boxes += `<div class="tree-box status-${t.status}${warnCls}" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;" data-id="${t.id}"${warnTitle}>
+      <div class="tree-box-top">
+        <span class="id-tag">${t.id}</span>
+        <span class="tree-box-title">${escapeHtml(t.title)}</span>
+      </div>
+      <div class="tree-box-bottom">
+        ${statusBadge(t.status)}
+        ${t.deadline ? `<span class="label-hint">${formatDate(t.deadline)}</span>` : ''}
+        ${badge}
+      </div>
+    </div>`;
+  });
 
-  const card = document.createElement('div');
-  card.className = `tree-node-card status-${task.status}` + (warnMap.has(task.id) ? ' warn-not-released' : '');
-  if (warnMap.has(task.id)) {
-    card.title = `Not yet Released, but ${warnMap.get(task.id).map(c => c.id).join(', ')} already is/are.`;
-  }
-  const multiParentBadge = task.parents.length > 1
-    ? `<span class="tree-multi-badge" title="Depends on ${task.parents.length} parent tasks">⛓ ${task.parents.length}</span>`
-    : '';
-  card.innerHTML = `
-    <span class="id-tag">${task.id}</span>
-    <span class="tree-node-title">${escapeHtml(task.title)}</span>
-    ${multiParentBadge}
-    <span class="tree-node-meta">
-      ${task.deadline ? `<span class="label-hint">${formatDate(task.deadline)}</span>` : ''}
-      ${statusBadge(task.status)}
-    </span>`;
-  card.onclick = () => openTaskModal(task.id);
-  row.appendChild(card);
-  node.appendChild(row);
+  canvas.style.width = canvasW + 'px';
+  canvas.style.height = canvasH + 'px';
+  canvas.style.transform = `scale(${TREE_ZOOM_LEVELS[ui.treeZoomIndex]})`;
+  canvas.innerHTML = `
+    <svg class="tree-svg-layer" width="${canvasW}" height="${canvasH}">
+      <defs>
+        <marker id="tree-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+      ${edges}
+    </svg>
+    ${boxes}`;
 
-  if (task.parents.length > 1) {
-    const note = document.createElement('div');
-    note.className = 'tree-extra-parent';
-    note.textContent = `Depends on: ${task.parents.map(pid => {
-      const p = getTask(pid);
-      return p ? `${pid} (${p.title})` : pid;
-    }).join(', ')}`;
-    node.appendChild(note);
-  }
-
-  if (hasExpandable && !collapsed) {
-    const childWrap = document.createElement('div');
-    childWrap.className = 'tree-children';
-    const newPath = new Set(ancestryPath); newPath.add(task.id);
-    primaryChildren.forEach(c => childWrap.appendChild(renderTreeNode(c, newPath, warnMap)));
-    secondaryChildren.forEach(c => childWrap.appendChild(renderTreeReferenceNode(c)));
-    node.appendChild(childWrap);
-  } else if (isCycle) {
-    const warn = document.createElement('div');
-    warn.className = 'tree-extra-parent';
-    warn.textContent = '⚠ cycle detected, stopping here';
-    node.appendChild(warn);
-  }
-
-  return node;
-}
-
-// Compact, non-expandable stand-in shown under every parent that is NOT
-// this task's primary parent. Clicking it jumps to (and briefly
-// highlights) the task's one full entry in the tree instead of
-// duplicating its whole subtree here.
-function renderTreeReferenceNode(task) {
-  const node = document.createElement('div');
-  node.className = 'tree-node tree-node-reference';
-
-  const row = document.createElement('div');
-  row.className = 'tree-node-row';
-
-  const spacer = document.createElement('span');
-  spacer.className = 'tree-toggle leaf';
-  row.appendChild(spacer);
-
-  const card = document.createElement('div');
-  card.className = `tree-node-card tree-ref-card status-${task.status}`;
-  card.title = 'This task has more than one parent — click to jump to its full entry';
-  card.innerHTML = `
-    <span class="tree-ref-icon">↳</span>
-    <span class="id-tag">${task.id}</span>
-    <span class="tree-node-title">${escapeHtml(task.title)}</span>
-    <span class="tree-node-meta">${statusBadge(task.status)}</span>`;
-  card.onclick = () => jumpToTreeTask(task.id);
-  row.appendChild(card);
-  node.appendChild(row);
-  return node;
-}
-
-// Expands every ancestor along the target's primary-parent chain so its
-// full entry is visible, then scrolls to it and flashes it briefly.
-function jumpToTreeTask(taskId) {
-  let t = getTask(taskId);
-  while (t) {
-    const pid = primaryParentId(t);
-    if (!pid) break;
-    ui.collapsedNodes.delete(pid);
-    t = getTask(pid);
-  }
-  renderTree();
-  requestAnimationFrame(() => {
-    const target = document.getElementById(`tree-task-${taskId}`);
-    if (!target) return;
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    const card = target.querySelector('.tree-node-card');
-    if (!card) return;
-    card.classList.add('tree-flash');
-    setTimeout(() => card.classList.remove('tree-flash'), 1500);
+  canvas.querySelectorAll('.tree-box').forEach(el => {
+    el.onclick = () => openTaskModal(el.dataset.id);
   });
 }
 
@@ -862,19 +936,38 @@ function renderTimeline() {
   const rows = items.map(({ task, sched }) => {
     const isMilestone = !(task.duration != null && task.duration > 0);
     const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
-    let barHtml;
+    let innerHtml;
 
     if (isMilestone) {
-      barHtml = `<div class="timeline-milestone status-${task.status}" style="left:${left}px;" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
+      innerHtml = `<div class="timeline-milestone status-${task.status}" style="left:${left}px;" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
     } else {
-      const width = Math.max(pxPerDay * 0.8, daysBetween(sched.start, sched.finish) * pxPerDay + pxPerDay * 0.6);
-      const compact = width < 74;
-      const hideText = width < 26;
       const derived = sched.finishSource === 'derived';
-      const label = hideText ? '' : (compact ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`);
-      const cls = ['timeline-bar', `status-${task.status}`, derived ? 'derived' : '', sched.conflict ? 'conflict' : '', compact ? 'compact' : ''].filter(Boolean).join(' ');
+      const runs = computeBusinessRuns(sched.start, sched.finish);
       const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
-      barHtml = `<div class="${cls}" style="left:${left}px;width:${width}px;" data-id="${task.id}" title="${escapeAttr(tooltip)}">${label}</div>`;
+      const cls = ['timeline-bar', `status-${task.status}`, derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
+
+      const segHtml = runs.map(([runStart, runEnd], i) => {
+        const segLeft = daysBetween(minDate, runStart) * pxPerDay + 1;
+        const segWidth = Math.max(pxPerDay * 0.7, (daysBetween(runStart, runEnd) + 1) * pxPerDay - 3);
+        const compact = segWidth < 74;
+        const hideText = segWidth < 26;
+        // Only the first segment carries the label, and only shows the
+        // full date range when the whole bar is a single run.
+        const label = (i === 0 && !hideText)
+          ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
+          : '';
+        const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
+        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;" data-id="${task.id}" title="${escapeAttr(tooltip)}">${label}</div>`;
+      }).join('');
+
+      const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
+        const nextStart = runs[i + 1][0];
+        const bLeft = daysBetween(minDate, runEnd) * pxPerDay + pxPerDay - 1;
+        const bWidth = daysBetween(runEnd, nextStart) * pxPerDay - pxPerDay + 2;
+        return `<div class="timeline-bar-bridge status-${task.status}" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;"></div>`;
+      }).join('');
+
+      innerHtml = bridgeHtml + segHtml;
     }
 
     return `<div class="timeline-row">
@@ -882,7 +975,7 @@ function renderTimeline() {
         <span class="id-tag">${task.id}</span>
         <span>${escapeHtml(task.title)}</span>
       </div>
-      <div class="timeline-track" style="width:${totalWidth}px;">${barHtml}</div>
+      <div class="timeline-track" style="width:${totalWidth}px;">${innerHtml}</div>
     </div>`;
   }).join('');
 
@@ -1146,15 +1239,18 @@ function closeFirebaseModal() {
 
 /* =========================================================
    EXAMPLE DATA
-   Demonstrates: explicit deadlines, a calculated (derived) deadline
-   on a parent task with none of its own, multiple parents, and a
-   task already Released while a parent is not (release warning).
+   Demonstrates: explicit deadlines, a calculated (derived) deadline on
+   a parent task with none of its own, a task already Released while a
+   parent is not (release warning), multiple parents, and a task (T-6)
+   that has no deadline and no children of its own — it only gets
+   scheduled because the iterative engine derives T-1's finish date
+   first (from T-2), which then unlocks T-6 going forward.
    ========================================================= */
 function loadExampleData() {
   const t = todayStr();
   state = {
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
-    nextIdNum: 6,
+    nextIdNum: 7,
     tasks: [
       {
         id: 'T-1', title: 'Component design', link: 'https://example.com/design-doc',
@@ -1187,6 +1283,12 @@ function loadExampleData() {
         id: 'T-5', title: 'Final bill of materials', link: '',
         status: 'working', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'],
         history: [{ date: addDays(t, -1), note: 'Task created' }],
+        createdAt: nowISO(),
+      },
+      {
+        id: 'T-6', title: 'Assembly drawings', link: '',
+        status: 'working', deadline: null, duration: 4, parents: ['T-1'],
+        history: [{ date: addDays(t, -1), note: 'Task created — has no deadline of its own; scheduled forward once T-1 gets a calculated finish date from T-2.' }],
         createdAt: nowISO(),
       },
     ],
@@ -1289,10 +1391,18 @@ function initListFilters() {
 }
 
 function initTreeControls() {
-  document.getElementById('btnExpandAll').onclick = () => { ui.collapsedNodes.clear(); renderTree(); };
-  document.getElementById('btnCollapseAll').onclick = () => {
-    state.tasks.forEach(t => { if (getChildren(t.id).length) ui.collapsedNodes.add(t.id); });
+  document.getElementById('btnTreeZoomIn').onclick = () => {
+    ui.treeZoomIndex = Math.min(TREE_ZOOM_LEVELS.length - 1, ui.treeZoomIndex + 1);
     renderTree();
+  };
+  document.getElementById('btnTreeZoomOut').onclick = () => {
+    ui.treeZoomIndex = Math.max(0, ui.treeZoomIndex - 1);
+    renderTree();
+  };
+  document.getElementById('btnTreeFit').onclick = () => {
+    ui.treeZoomIndex = 3;
+    renderTree();
+    document.getElementById('treeCanvasWrap').scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   };
 }
 
@@ -1349,6 +1459,7 @@ function initModal() {
 }
 
 function init() {
+  document.getElementById('versionBadge').textContent = APP_VERSION;
   initTabs();
   initToolbar();
   initListFilters();

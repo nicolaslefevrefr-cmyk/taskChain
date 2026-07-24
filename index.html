@@ -19,6 +19,7 @@
       <div class="brand">
         <span class="brand-mark">⛓</span>
         <span class="brand-name">TaskChain</span>
+        <span class="version-badge" id="versionBadge"></span>
       </div>
       <input id="projectNameInput" class="project-name-input" type="text" value="Untitled project" spellcheck="false">
     </div>
@@ -87,13 +88,16 @@
     <!-- ===================== TAB: TREE ===================== -->
     <section class="tab-panel" id="panel-tree">
       <div class="panel-toolbar">
-        <p class="panel-hint">A <strong>parent</strong> task must finish before its <strong>child</strong> tasks can start. Changing a parent's status can cascade to its children. A dashed orange outline flags a task that is not yet Released while one of its descendants already is. A task with several parents is shown in full under its first parent; its other parents show a linked reference (<strong>↳</strong>) — click it to jump straight to the full entry.</p>
+        <p class="panel-hint">Boxes are tasks, arrows point from a parent to the child(ren) that depend on it — a parent must finish before its children can start. A dashed orange outline flags a task that is not yet Released while one of its descendants already is.</p>
         <div class="btn-group">
-          <button class="btn btn-ghost btn-sm" id="btnExpandAll">Expand all</button>
-          <button class="btn btn-ghost btn-sm" id="btnCollapseAll">Collapse all</button>
+          <button class="btn btn-ghost btn-sm" id="btnTreeZoomOut" title="Zoom out">−</button>
+          <button class="btn btn-ghost btn-sm" id="btnTreeZoomIn" title="Zoom in">+</button>
+          <button class="btn btn-ghost btn-sm" id="btnTreeFit" title="Reset zoom and scroll">Fit</button>
         </div>
       </div>
-      <div class="tree-wrap" id="treeWrap"></div>
+      <div class="tree-canvas-wrap" id="treeCanvasWrap">
+        <div class="tree-canvas" id="treeCanvas"></div>
+      </div>
     </section>
 
     <!-- ===================== TAB: PLANNING (Kanban + schedule-aware Gantt) ===================== -->

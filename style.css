@@ -76,6 +76,11 @@ a{color:var(--accent);}
   color:#fff;font-size:15px;
 }
 .brand-name{font-weight:700;font-size:16px;letter-spacing:-.01em;}
+.version-badge{
+  font-family:var(--font-mono);font-size:10.5px;color:var(--text-tertiary);
+  background:var(--surface-alt);border:1px solid var(--border);border-radius:100px;
+  padding:1px 8px;margin-left:2px;
+}
 .project-name-input{
   border:1px solid transparent;background:transparent;
   font-size:14px;font-weight:500;color:var(--text-secondary);
@@ -216,55 +221,38 @@ a{color:var(--accent);}
 .empty-state p{margin-bottom:14px;}
 
 /* =========================================================
-   TREE VIEW
+   TREE VIEW — node-link diagram (boxes + connectors, zoomable)
    ========================================================= */
-.tree-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;}
-.tree-root-list{display:flex;flex-direction:column;gap:2px;}
-.tree-node{position:relative;}
-.tree-node-row{
-  display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--radius-sm);
-  cursor:default;
+.tree-canvas-wrap{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  overflow:auto;padding:0;position:relative;max-height:72vh;
 }
-.tree-node-row:hover{background:var(--surface-alt);}
-.tree-toggle{
-  width:18px;height:18px;flex-shrink:0;border:none;background:transparent;cursor:pointer;
-  color:var(--text-tertiary);font-size:11px;display:flex;align-items:center;justify-content:center;
-  border-radius:3px;
+.tree-canvas{
+  position:relative;transform-origin:0 0;padding:32px;
 }
-.tree-toggle:hover{background:var(--border);}
-.tree-toggle.leaf{visibility:hidden;}
-.tree-node-card{
-  display:flex;align-items:center;gap:10px;flex:1;min-width:0;
-  padding:6px 10px;border-radius:var(--radius-sm);border-left:3px solid var(--border-strong);
-  background:var(--surface-alt);cursor:pointer;
+.tree-svg-layer{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}
+.tree-edge{fill:none;stroke:var(--border-strong);stroke-width:1.6;}
+.tree-box{
+  position:absolute;box-sizing:border-box;border-radius:var(--radius-sm);
+  border:1px solid var(--border);border-left:4px solid var(--border-strong);
+  background:var(--surface-alt);padding:8px 10px;cursor:pointer;
+  display:flex;flex-direction:column;gap:3px;justify-content:center;
+  box-shadow:var(--shadow-sm);
 }
-.tree-node-card:hover{box-shadow:var(--shadow-sm);}
-.tree-node-card.status-working{border-left-color:var(--status-working);}
-.tree-node-card.status-release_process{border-left-color:var(--status-release_process);}
-.tree-node-card.status-released{border-left-color:var(--status-released);}
-.tree-node-card.status-rework{border-left-color:var(--status-rework);}
-.tree-node-card.warn-not-released{outline:2px dashed var(--warn-border);outline-offset:2px;}
-.tree-node-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.tree-node-meta{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0;}
-.tree-children{margin-left:26px;padding-left:16px;border-left:1px dashed var(--border-strong);display:flex;flex-direction:column;gap:2px;margin-top:2px;}
-.tree-extra-parent{
-  font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono);
-  margin-left:44px;margin-top:-2px;margin-bottom:2px;
-}
+.tree-box:hover{box-shadow:var(--shadow);border-color:var(--border-strong);}
+.tree-box.status-working{border-left-color:var(--status-working);}
+.tree-box.status-release_process{border-left-color:var(--status-release_process);}
+.tree-box.status-released{border-left-color:var(--status-released);}
+.tree-box.status-rework{border-left-color:var(--status-rework);}
+.tree-box.warn-not-released{outline:2px dashed var(--warn-border);outline-offset:2px;}
+.tree-box-top{display:flex;align-items:center;gap:6px;min-width:0;}
+.tree-box-title{font-weight:600;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tree-box-bottom{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .tree-multi-badge{
-  font-size:10.5px;font-family:var(--font-mono);color:var(--accent-dark);
-  background:var(--accent-light);border-radius:100px;padding:1px 7px;flex-shrink:0;
+  font-size:10px;font-family:var(--font-mono);color:var(--accent-dark);
+  background:var(--accent-light);border-radius:100px;padding:0 6px;flex-shrink:0;
 }
-.tree-ref-card{
-  border-left-style:dashed;background:var(--surface);opacity:.82;
-}
-.tree-ref-card:hover{opacity:1;}
-.tree-ref-icon{color:var(--text-tertiary);font-weight:700;flex-shrink:0;}
-@keyframes treeFlash{
-  0%{box-shadow:0 0 0 3px var(--accent);}
-  100%{box-shadow:0 0 0 0 rgba(43,95,110,0);}
-}
-.tree-flash{animation:treeFlash 1.4s ease-out;}
+.tree-empty-note{padding:24px;text-align:center;color:var(--text-tertiary);}
 
 /* =========================================================
    KANBAN / PLANNING
@@ -336,6 +324,11 @@ a{color:var(--accent);}
 .timeline-bar.derived.status-rework{color:var(--status-rework);}
 .timeline-bar.conflict{outline:2px solid var(--status-rework);outline-offset:1px;}
 .timeline-bar.compact{padding:0 4px;justify-content:center;}
+.timeline-bar-bridge{position:absolute;top:19px;height:2px;background:currentColor;opacity:.35;pointer-events:none;}
+.timeline-bar-bridge.status-working{color:var(--status-working);}
+.timeline-bar-bridge.status-release_process{color:var(--status-release_process);}
+.timeline-bar-bridge.status-released{color:var(--status-released);}
+.timeline-bar-bridge.status-rework{color:var(--status-rework);}
 .timeline-milestone{
   position:absolute;top:11px;width:16px;height:16px;transform:translateX(-50%) rotate(45deg);
   cursor:pointer;box-shadow:var(--shadow-sm);
