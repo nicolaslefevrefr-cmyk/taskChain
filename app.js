@@ -10,10 +10,11 @@
    label is renamed later) since tasks store it in task.status. */
 function defaultStatuses() {
   return [
-    { key: 'working', label: 'Working', color: '#2563EB' },
-    { key: 'release_process', label: 'In Release Process', color: '#B45309' },
-    { key: 'released', label: 'Released', color: '#15803D' },
-    { key: 'done', label: 'Done', color: '#0891B2' },
+    { key: 'not_started', label: 'Not Started', color: '#ECEDF7' },
+    { key: 'working', label: 'Working', color: '#9696FF' },
+    { key: 'done', label: 'Done', color: '#0000FF' },
+    { key: 'release_process', label: 'In Release Process', color: '#42FFF2' },
+    { key: 'released', label: 'Released', color: '#00FF00' },
     { key: 'rework', label: 'Rework', color: '#DC2626' },
   ];
 }
@@ -24,14 +25,38 @@ function getStatusMeta(key) {
 function generateStatusId() {
   return 'st' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
-// Lightens a hex color toward white by `amount` (0-1) — used for badge/chip backgrounds.
+// Mixes a hex color toward white (amount > 0) or black (amount < 0) by
+// |amount| (0-1) — used for badge/chip backgrounds and for darkening
+// colors that are too light to read as text (see readableStatusColor).
 function tintColor(hex, amount) {
   const h = (hex || '#9AA2AC').replace('#', '');
   const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
   const n = parseInt(full, 16) || 0;
   const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  const mix = (c) => Math.round(c + (255 - c) * amount);
+  const target = amount >= 0 ? 255 : 0;
+  const a = Math.abs(amount);
+  const mix = (c) => Math.round(c + (target - c) * a);
   return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}
+function relativeLuminance(hex) {
+  const h = (hex || '#000000').replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const n = parseInt(full, 16) || 0;
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+// A status color can be any custom value (e.g. a very pale "Not
+// Started" color), which would be unreadable used directly as text or
+// as a thin line on a white surface. This darkens it just enough to
+// stay legible while keeping its hue; normal colors pass through as-is.
+// Only used where the color IS the text/stroke — plain accents (a left
+// border, a filled diamond) use the raw color regardless of lightness.
+function readableStatusColor(hex) {
+  return relativeLuminance(hex) > 0.65 ? tintColor(hex, -0.55) : hex;
+}
+// White or dark text — whichever reads better on a solid fill of this color.
+function contrastTextFor(hex) {
+  return relativeLuminance(hex) > 0.6 ? '#1A1D23' : '#FFFFFF';
 }
 
 const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
@@ -39,7 +64,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.6';
+const APP_VERSION = 'v1.7';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -1004,8 +1029,8 @@ function renderStatusFilterChips() {
   getStatuses().forEach(s => {
     const isActive = active === s.key;
     const style = isActive
-      ? `background:${s.color};border-color:${s.color};color:#fff;`
-      : `color:${s.color};border-color:${tintColor(s.color, 0.55)};`;
+      ? `background:${s.color};border-color:${s.color};color:${contrastTextFor(s.color)};`
+      : `color:${readableStatusColor(s.color)};border-color:${tintColor(s.color, 0.55)};`;
     html += `<button class="chip" data-status="${s.key}" style="${style}">${escapeHtml(s.label)}</button>`;
   });
   wrap.innerHTML = html;
@@ -1020,7 +1045,8 @@ function renderStatusFilterChips() {
 
 function statusBadge(status) {
   const meta = getStatusMeta(status);
-  return `<span class="badge-status" style="color:${meta.color};background:${tintColor(meta.color, 0.85)};">${escapeHtml(meta.label)}</span>`;
+  const textColor = readableStatusColor(meta.color);
+  return `<span class="badge-status" style="color:${textColor};background:${tintColor(meta.color, 0.85)};">${escapeHtml(meta.label)}</span>`;
 }
 
 /* =========================================================
@@ -1119,20 +1145,7 @@ function renderTree() {
       const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
       const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
       const midY = (y1 + y2) / 2;
-
-      // An edge that skips more than one level runs a real risk of
-      // passing straight through a box sitting at an intermediate level
-      // (most visibly when both ends share the same column). Bow it
-      // sideways so it curves around instead of cutting through.
-      const levelSpan = positions[t.id].level - positions[pid].level;
-      let c1x = x1, c2x = x2;
-      if (levelSpan > 1) {
-        const dir = (hashCode(pid + '>' + t.id) % 2 === 0) ? 1 : -1;
-        const bow = Math.min(70, 16 * (levelSpan - 1)) * dir;
-        c1x += bow; c2x += bow;
-      }
-
-      edges += `<path class="tree-edge" data-parent="${pid}" data-child="${t.id}" style="stroke:${parentMeta.color};" d="M ${x1} ${y1} C ${c1x} ${midY}, ${c2x} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
+      edges += `<path class="tree-edge" data-parent="${pid}" data-child="${t.id}" style="stroke:${readableStatusColor(parentMeta.color)};" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
     });
   });
 
@@ -1140,7 +1153,7 @@ function renderTree() {
   state.tasks.forEach(t => {
     const meta = getStatusMeta(t.status);
     const badge = t.parents.length > 1 ? `<span class="tree-multi-badge" title="Depends on ${t.parents.length} parent tasks">⛓ ${t.parents.length}</span>` : '';
-    boxes += `<div class="tree-box" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;border-left-color:${meta.color};" data-id="${t.id}">
+    boxes += `<div class="tree-box" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;border-left-color:${readableStatusColor(meta.color)};" data-id="${t.id}">
       <div class="tree-box-top">
         <span class="id-tag">${t.id}</span>
         <span class="tree-box-title">${escapeHtml(t.title)}</span>
@@ -1161,7 +1174,7 @@ function renderTree() {
       <defs>
         ${getStatuses().map(s => `
         <marker id="tree-arrow-${s.key}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,0 L8,4 L0,8 z" style="fill:${s.color};"></path>
+          <path d="M0,0 L8,4 L0,8 z" style="fill:${readableStatusColor(s.color)};"></path>
         </marker>`).join('')}
       </defs>
       ${edges}
@@ -1177,14 +1190,6 @@ function renderTree() {
   });
 }
 
-// Small deterministic string hash, used to pick a stable left/right bow
-// direction per edge (so the same edge always curves the same way).
-function hashCode(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
 /* =========================================================
    RENDER: KANBAN (planning tab)
    ========================================================= */
@@ -1196,7 +1201,7 @@ function renderKanban() {
     const tasks = state.tasks.filter(t => t.status === s.key)
       .sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
     return `<div class="kanban-col" data-status="${s.key}">
-      <div class="kanban-col-header" style="color:${s.color};">
+      <div class="kanban-col-header" style="color:${readableStatusColor(s.color)};">
         <span>${escapeHtml(s.label)}</span>
         <span class="kanban-col-count">${tasks.length}</span>
       </div>
@@ -1233,7 +1238,7 @@ function renderKanban() {
 function kanbanCardHtml(t) {
   const meta = getStatusMeta(t.status);
   const childCount = getDescendants(t.id).length;
-  return `<div class="kanban-card" style="border-left-color:${meta.color};" draggable="true" data-id="${t.id}">
+  return `<div class="kanban-card" style="border-left-color:${readableStatusColor(meta.color)};" draggable="true" data-id="${t.id}">
     <div class="kanban-card-title">${escapeHtml(t.title)}</div>
     <div class="kanban-card-meta">
       <span class="kanban-card-id">${t.id}</span>
@@ -1301,7 +1306,9 @@ function renderTimeline() {
       const derived = sched.finishSource === 'derived';
       const runs = computeBusinessRuns(sched.start, sched.finish);
       const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
-      const colorStyle = derived ? `color:${meta.color};` : `background-color:${meta.color};`;
+      const colorStyle = derived
+        ? `color:${readableStatusColor(meta.color)};`
+        : `background-color:${meta.color};color:${contrastTextFor(meta.color)};`;
       const cls = ['timeline-bar', derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
 
       const segHtml = runs.map(([runStart, runEnd], i) => {
@@ -1322,7 +1329,7 @@ function renderTimeline() {
         const nextStart = runs[i + 1][0];
         const bLeft = daysBetween(minDate, runEnd) * pxPerDay + pxPerDay - 1;
         const bWidth = daysBetween(runEnd, nextStart) * pxPerDay - pxPerDay + 2;
-        return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${meta.color};"></div>`;
+        return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${readableStatusColor(meta.color)};"></div>`;
       }).join('');
 
       innerHtml = bridgeHtml + segHtml;

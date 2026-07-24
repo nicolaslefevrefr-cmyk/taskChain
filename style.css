@@ -334,7 +334,7 @@ a{color:var(--accent);}
 .timeline-bar-bridge{position:absolute;top:19px;height:2px;background:currentColor;opacity:.35;pointer-events:none;}
 .timeline-milestone{
   position:absolute;top:11px;width:16px;height:16px;transform:translateX(-50%) rotate(45deg);
-  cursor:pointer;box-shadow:var(--shadow-sm);
+  cursor:pointer;box-shadow:var(--shadow-sm);border:1.5px solid rgba(20,26,33,.15);
 }
 .timeline-ruler{display:flex;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:3;height:30px;}
 .timeline-ruler .timeline-label{background:var(--surface-alt);height:30px;}
