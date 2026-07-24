@@ -5,12 +5,9 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 ## Features
 
 - **Multiple projects**: a collapsible sidebar on the left lists every project you're working on. Create new ones, switch between them, rename, duplicate, or delete them, and export any single one as its own JSON file — all from the sidebar. Each project has its own independent set of tasks; nothing is shared between them except the workspace they live in.
-- **Tasks**: title, link, status (`Working`, `In Release Process`, `Released`, `Rework`), deadline, duration (business days), history (date + note), automatic ID (`T-1`, `T-2`, …).
-- **Parent → child links**: a task can depend on one or more parent tasks (which must finish before it can start).
-- **Status changes go through a dedicated modal**: every status change (drag-and-drop or the edit form) opens a small dialog to log a date-stamped reason and, if relevant, cascade the change to child tasks.
-  - Moving a task **backward** (e.g. Released → Working/Rework) can cascade to all descendants, since their work may now be invalid.
-  - Moving a task **to Released never cascades** — a parent finishing doesn't mean its children are automatically done too.
-- **Release-order warning**: any task that is not yet Released while one of its descendants already is gets a dashed orange outline (Tree and Planning views) or a warning icon (List view and its own edit modal).
+- **Tasks**: title, link, status, deadline, duration (business days), history (date + note), automatic ID (`T-1`, `T-2`, …).
+- **Customizable statuses, shared across your whole workspace**: the "⚙ Statuses" button lets you add, rename, recolor, reorder, or delete statuses — they apply to every project. Comes with five defaults (`Working`, `In Release Process`, `Released`, `Done`, `Rework`); deleting a status that's still in use moves those tasks to the next one, after asking you to confirm.
+- **Status changes always go through one simple dialog**: moving a task to any status (via drag-and-drop or the edit form) opens a small dialog to log a date-stamped reason and — if that task has children — asks whether to also apply the change to them. That checkbox starts **unchecked every time**; there's no special-casing of any particular status. If you do propagate, the same reason is copied into every affected child's history.
 - **3 tabs**:
   - **List** — filterable/searchable table with inline editing. The "Depends on" column shows both the ID and the title of each parent (e.g. `T-1: Design`).
   - **Tree** — a real node-link diagram: every task is a box, drawn exactly once, with an arrow from each of its parents to it (so a task with several parents just gets several incoming arrows — nothing is duplicated). Zoom in/out buttons and a "Fit" button are provided; the layout uses a simple layered arrangement (a task always sits below every parent that feeds into it) with a couple of passes to reduce crossing lines — no physics/force simulation.
@@ -20,7 +17,7 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 - **Timeline controls**: zoom in/out buttons to change the day granularity (bars hide their inner text when they get too small), light vertical lines separating each week, and weekend columns lightly shaded.
 - **JSON save/load**: "Export JSON" in the header saves your **whole workspace** (every project) as one `.json` file; "Load JSON" accepts either that same whole-workspace format (replaces everything, with a confirmation) or a single project's file (added alongside your existing projects, nothing is overwritten). Each sidebar project also has its own "⬇" icon to export just that one project. A local autosave (`localStorage`) also protects your work between sessions in the same browser.
 - **Firebase sync** (optional): the "☁ Firebase" button opens a modal to save/load your **whole workspace** (every project) to/from your own Firebase project (Firestore), as one document. See [Setting up Firebase](#setting-up-firebase) below.
-- A small version badge next to the app name (e.g. `v1.2`) is bumped on each round of changes, so you can tell builds apart at a glance.
+- A small version badge next to the app name (e.g. `v1.5`) is bumped on each round of changes, so you can tell builds apart at a glance.
 - Clean, light, no-nonsense theme.
 
 ## Using it locally
@@ -127,5 +124,5 @@ In the app's Firebase modal, the "Document name" field is the ID of the Firestor
 
 ## Design notes
 
-- A **parent** task must finish before its **child** tasks can start (e.g. "Design" before "Calculations"). That's why a status change on a parent can ripple down to its children — except moving to Released, which only ever applies to the task itself.
+- A **parent** task must finish before its **child** tasks can start (e.g. "Design" before "Calculations"). That's why any status change on a parent — moving forward, backward, to any status — offers to cascade to its children; the choice is always yours, and the checkbox always starts unchecked.
 - The scheduling engine uses this same relationship in reverse for calculated dates: for a child task to meet its deadline, its parent must finish by `child deadline − child duration` (in business days). This is computed recursively up the whole dependency chain, and is what powers the calculated (dashed) bars in the Planning timeline.

@@ -3,21 +3,43 @@
    Vanilla JS, no dependencies. Single source of truth: `state`.
    ========================================================= */
 
-/* ---------- Status metadata ---------- */
-const STATUS_ORDER = ['working', 'release_process', 'released', 'rework'];
-const STATUS_META = {
-  working:         { label: 'Working' },
-  release_process: { label: 'In Release Process' },
-  released:        { label: 'Released' },
-  rework:          { label: 'Rework' },
-};
+/* ---------- Status system ----------
+   Statuses are no longer a fixed set: workspace.statuses is an array of
+   { key, label, color } shared by every project, editable from the
+   "⚙ Statuses" modal. `key` never changes once created (even if the
+   label is renamed later) since tasks store it in task.status. */
+function defaultStatuses() {
+  return [
+    { key: 'working', label: 'Working', color: '#2563EB' },
+    { key: 'release_process', label: 'In Release Process', color: '#B45309' },
+    { key: 'released', label: 'Released', color: '#15803D' },
+    { key: 'done', label: 'Done', color: '#0891B2' },
+    { key: 'rework', label: 'Rework', color: '#DC2626' },
+  ];
+}
+function getStatuses() { return workspace.statuses; }
+function getStatusMeta(key) {
+  return getStatuses().find(s => s.key === key) || { key, label: key || 'Unknown', color: '#9AA2AC' };
+}
+function generateStatusId() {
+  return 'st' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+// Lightens a hex color toward white by `amount` (0-1) — used for badge/chip backgrounds.
+function tintColor(hex, amount) {
+  const h = (hex || '#9AA2AC').replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const n = parseInt(full, 16) || 0;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const mix = (c) => Math.round(c + (255 - c) * amount);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}
 
 const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
 const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagram scale
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.4';
+const APP_VERSION = 'v1.5';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -50,7 +72,7 @@ function createEmptyProject(name) {
 }
 function createDefaultWorkspace() {
   const p = createEmptyProject('Untitled project');
-  return { projects: [p], activeProjectId: p.id };
+  return { projects: [p], activeProjectId: p.id, statuses: defaultStatuses() };
 }
 function getActiveProject() {
   return workspace.projects.find(p => p.id === workspace.activeProjectId) || workspace.projects[0];
@@ -87,6 +109,11 @@ function normalizeWorkspace(w) {
   if (!w.activeProjectId || !w.projects.some(p => p.id === w.activeProjectId)) {
     w.activeProjectId = w.projects[0].id;
   }
+  if (!Array.isArray(w.statuses) || !w.statuses.length) {
+    w.statuses = defaultStatuses();
+  } else {
+    w.statuses.forEach(s => { if (!s.color) s.color = '#9AA2AC'; if (!s.label) s.label = s.key; });
+  }
   return w;
 }
 
@@ -106,7 +133,7 @@ function loadWorkspace() {
       const legacy = JSON.parse(legacyRaw);
       if (legacy && Array.isArray(legacy.tasks)) {
         normalizeProject(legacy);
-        return { projects: [legacy], activeProjectId: legacy.id };
+        return normalizeWorkspace({ projects: [legacy], activeProjectId: legacy.id });
       }
     }
   } catch (e) { /* ignore, fall through to a fresh workspace */ }
@@ -353,22 +380,6 @@ function computeSchedule() {
   return out;
 }
 
-/* Maps taskId -> [releasedDescendantTask, ...] for tasks that are NOT
-   released while a descendant already is. Used to draw the dashed
-   orange warning around parent tasks. */
-function computeUnreleasedParentWarnings() {
-  const warnMap = new Map();
-  state.tasks.filter(t => t.status === 'released').forEach(r => {
-    getAncestors(r.id).forEach(a => {
-      if (a.status !== 'released') {
-        if (!warnMap.has(a.id)) warnMap.set(a.id, []);
-        warnMap.get(a.id).push(r);
-      }
-    });
-  });
-  return warnMap;
-}
-
 /* =========================================================
    CRUD
    ========================================================= */
@@ -604,12 +615,120 @@ function initSidebar() {
 }
 
 /* =========================================================
+   STATUS SETTINGS
+   Statuses are shared across every project in the workspace. Deleting
+   one that's still in use moves the affected tasks (in ALL projects,
+   not just the active one) to the next remaining status.
+   ========================================================= */
+function renderStatusSettingsList() {
+  const wrap = document.getElementById('statusSettingsList');
+  const statuses = getStatuses();
+  wrap.innerHTML = statuses.map((s, i) => `
+    <div class="status-setting-row">
+      <input type="color" class="status-color-input" value="${s.color}" data-key="${s.key}" title="Color">
+      <input type="text" class="status-label-input" value="${escapeAttr(s.label)}" data-key="${s.key}">
+      <div class="status-setting-actions">
+        <button data-action="up" data-key="${s.key}" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
+        <button data-action="down" data-key="${s.key}" ${i === statuses.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
+        <button data-action="delete" data-key="${s.key}" title="Delete">🗑</button>
+      </div>
+    </div>`).join('');
+
+  wrap.querySelectorAll('.status-color-input').forEach(el => {
+    el.oninput = () => {
+      const s = getStatuses().find(x => x.key === el.dataset.key);
+      if (!s) return;
+      s.color = el.value;
+      saveState();
+      renderAll();
+    };
+  });
+  wrap.querySelectorAll('.status-label-input').forEach(el => {
+    el.onchange = () => {
+      const s = getStatuses().find(x => x.key === el.dataset.key);
+      if (!s) return;
+      s.label = el.value.trim() || s.label;
+      el.value = s.label;
+      saveState();
+      renderAll();
+    };
+  });
+  wrap.querySelectorAll('[data-action]').forEach(btn => {
+    btn.onclick = async () => {
+      const key = btn.dataset.key;
+      const action = btn.dataset.action;
+      const idx = workspace.statuses.findIndex(x => x.key === key);
+      if (idx === -1) return;
+      if (action === 'up' && idx > 0) {
+        [workspace.statuses[idx - 1], workspace.statuses[idx]] = [workspace.statuses[idx], workspace.statuses[idx - 1]];
+      } else if (action === 'down' && idx < workspace.statuses.length - 1) {
+        [workspace.statuses[idx + 1], workspace.statuses[idx]] = [workspace.statuses[idx], workspace.statuses[idx + 1]];
+      } else if (action === 'delete') {
+        await handleDeleteStatus(key);
+        return; // handleDeleteStatus already re-renders
+      }
+      saveState();
+      renderAll();
+      renderStatusSettingsList();
+    };
+  });
+}
+
+async function handleDeleteStatus(key) {
+  if (workspace.statuses.length <= 1) { toast('You need at least one status.'); return; }
+  const meta = getStatusMeta(key);
+  const fallback = workspace.statuses.find(s => s.key !== key);
+  const usageCount = workspace.projects.reduce((sum, p) => sum + p.tasks.filter(t => t.status === key).length, 0);
+
+  if (usageCount > 0) {
+    const choice = await showConfirm(
+      `${usageCount} task(s) across your projects currently use "${meta.label}". Deleting it will move them to "${fallback.label}". Continue?`,
+      [
+        { label: 'Cancel', value: 'no' },
+        { label: 'Delete status', value: 'yes', danger: true, primary: true },
+      ]
+    );
+    if (choice !== 'yes') return;
+    workspace.projects.forEach(p => p.tasks.forEach(t => { if (t.status === key) t.status = fallback.key; }));
+  }
+
+  workspace.statuses = workspace.statuses.filter(s => s.key !== key);
+  saveState();
+  renderAll();
+  renderStatusSettingsList();
+  toast('Status deleted.');
+}
+
+async function handleAddStatus() {
+  const name = await showPrompt('New status name', 'New status');
+  if (name === null) return;
+  const palette = ['#2563EB', '#B45309', '#15803D', '#0891B2', '#DC2626', '#7C3AED', '#DB2777', '#65A30D'];
+  const color = palette[workspace.statuses.length % palette.length];
+  workspace.statuses.push({ key: generateStatusId(), label: name.trim() || 'New status', color });
+  saveState();
+  renderAll();
+  renderStatusSettingsList();
+}
+
+function initStatusSettings() {
+  const overlay = document.getElementById('statusSettingsOverlay');
+  document.getElementById('btnStatusSettings').onclick = () => {
+    renderStatusSettingsList();
+    overlay.classList.add('open');
+  };
+  document.getElementById('statusSettingsClose').onclick = () => overlay.classList.remove('open');
+  document.getElementById('statusSettingsDone').onclick = () => overlay.classList.remove('open');
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
+  document.getElementById('btnAddStatus').onclick = handleAddStatus;
+}
+
+/* =========================================================
    STATUS CHANGE MODAL
    Pops up whenever a task's status changes (Kanban drag or the
    status dropdown in the edit modal). Lets the user log a reason
-   and choose whether to cascade to child tasks. Cascading is never
-   offered when moving TO Released — a parent finishing does not
-   mean its children are automatically done.
+   and, if the task has children, always asks whether to also apply
+   the change to them — the checkbox starts unchecked every time, and
+   the same reason is copied into the children's history if propagated.
    ========================================================= */
 function showStatusChangeModal(task, newStatus) {
   return new Promise(resolve => {
@@ -621,9 +740,9 @@ function showStatusChangeModal(task, newStatus) {
     document.getElementById('statusChangeNote').value = '';
 
     const descendants = getDescendants(task.id);
-    const canPropagate = newStatus !== 'released' && descendants.length > 0;
+    const canPropagate = descendants.length > 0;
     document.getElementById('statusChangePropagateRow').hidden = !canPropagate;
-    document.getElementById('statusChangePropagateCheckbox').checked = true;
+    document.getElementById('statusChangePropagateCheckbox').checked = false;
     document.getElementById('statusChangePropagateLabel').textContent =
       `Also apply to ${descendants.length} child task${descendants.length === 1 ? '' : 's'}`;
 
@@ -647,8 +766,8 @@ async function promptAndApplyStatusChange(task, newStatus) {
   const result = await showStatusChangeModal(task, newStatus);
   if (!result) return false;
 
-  const oldLabel = STATUS_META[task.status].label;
-  const newLabel = STATUS_META[newStatus].label;
+  const oldLabel = getStatusMeta(task.status).label;
+  const newLabel = getStatusMeta(newStatus).label;
   const suffix = result.note ? ` — ${result.note}` : '';
 
   task.history.push({ date: result.date, note: `Status changed: ${oldLabel} → ${newLabel}${suffix}` });
@@ -678,7 +797,7 @@ function openTaskModal(taskId) {
   document.getElementById('taskModalTitle').textContent = task ? `Edit ${task.id}` : 'New task';
   document.getElementById('taskFormId').value = task ? task.id : '';
   document.getElementById('taskTitle').value = task ? task.title : '';
-  document.getElementById('taskStatus').value = task ? task.status : 'working';
+  populateStatusSelect(task ? task.status : getStatuses()[0].key);
   document.getElementById('taskLink').value = task ? (task.link || '') : '';
   document.getElementById('taskDeadline').value = task ? (task.deadline || '') : '';
   document.getElementById('taskDuration').value = task && task.duration != null ? task.duration : '';
@@ -709,11 +828,16 @@ function openTaskModal(taskId) {
     refreshModalComputedDisplays(task.id);
   } else {
     document.getElementById('taskDeadlineNote').textContent = '';
-    document.getElementById('parentWarningBanner').hidden = true;
   }
 
   document.getElementById('taskModalOverlay').classList.add('open');
   document.getElementById('taskTitle').focus();
+}
+
+function populateStatusSelect(selectedKey) {
+  const sel = document.getElementById('taskStatus');
+  sel.innerHTML = getStatuses().map(s => `<option value="${s.key}">${escapeHtml(s.label)}</option>`).join('');
+  sel.value = selectedKey;
 }
 
 function refreshModalComputedDisplays(taskId) {
@@ -736,16 +860,6 @@ function refreshModalComputedDisplays(taskId) {
   } else {
     noteEl.textContent = '';
     noteEl.className = 'field-note';
-  }
-
-  const warnMap = computeUnreleasedParentWarnings();
-  const banner = document.getElementById('parentWarningBanner');
-  if (warnMap.has(taskId)) {
-    const list = warnMap.get(taskId).map(c => `${c.id} (${c.title})`).join(', ');
-    banner.textContent = `⚠ This task is not yet Released, but the following descendant task(s) already are: ${list}.`;
-    banner.hidden = false;
-  } else {
-    banner.hidden = true;
   }
 }
 
@@ -834,7 +948,6 @@ function renderList() {
   const tbody = document.getElementById('taskTableBody');
   const list = getFilteredTasks();
   const schedule = computeSchedule();
-  const warnMap = computeUnreleasedParentWarnings();
 
   document.getElementById('listEmptyState').hidden = state.tasks.length > 0;
   document.getElementById('taskTableBody').closest('table').style.display = state.tasks.length ? '' : 'none';
@@ -865,14 +978,10 @@ function renderList() {
       deadlineHtml = '<span class="label-hint">—</span>';
     }
 
-    const warnHtml = warnMap.has(t.id)
-      ? `<span class="warn-icon" title="A descendant task is already Released while this task is not">⚠</span>`
-      : '';
-
     return `<tr>
       <td class="id-tag">${t.id}</td>
       <td class="task-title-cell" data-open="${t.id}">${escapeHtml(t.title)}</td>
-      <td>${statusBadge(t.status)}${warnHtml}</td>
+      <td>${statusBadge(t.status)}</td>
       <td>${parentsHtml}</td>
       <td>${deadlineHtml}</td>
       <td>${t.duration != null ? t.duration + ' d' : '<span class="label-hint">—</span>'}</td>
@@ -888,9 +997,30 @@ function renderList() {
   });
 }
 
+function renderStatusFilterChips() {
+  const wrap = document.getElementById('statusFilterChips');
+  const active = ui.statusFilter;
+  let html = `<button class="chip chip-all${active === 'all' ? ' active' : ''}" data-status="all">All</button>`;
+  getStatuses().forEach(s => {
+    const isActive = active === s.key;
+    const style = isActive
+      ? `background:${s.color};border-color:${s.color};color:#fff;`
+      : `color:${s.color};border-color:${tintColor(s.color, 0.55)};`;
+    html += `<button class="chip" data-status="${s.key}" style="${style}">${escapeHtml(s.label)}</button>`;
+  });
+  wrap.innerHTML = html;
+  wrap.querySelectorAll('.chip').forEach(chip => {
+    chip.onclick = () => {
+      ui.statusFilter = chip.dataset.status;
+      renderStatusFilterChips();
+      renderList();
+    };
+  });
+}
+
 function statusBadge(status) {
-  const meta = STATUS_META[status] || { label: status };
-  return `<span class="badge-status status-${status}">${meta.label}</span>`;
+  const meta = getStatusMeta(status);
+  return `<span class="badge-status" style="color:${meta.color};background:${tintColor(meta.color, 0.85)};">${escapeHtml(meta.label)}</span>`;
 }
 
 /* =========================================================
@@ -973,7 +1103,6 @@ function renderTree() {
     return;
   }
 
-  const warnMap = computeUnreleasedParentWarnings();
   const { positions, maxLevel, maxCount } = computeTreeLayout();
 
   const canvasW = maxCount * (TREE_BOX_W + TREE_H_GAP) - TREE_H_GAP + TREE_PAD * 2;
@@ -986,20 +1115,19 @@ function renderTree() {
   state.tasks.forEach(t => {
     t.parents.forEach(pid => {
       if (!positions[pid]) return;
-      const parentTask = getTask(pid);
+      const parentMeta = getStatusMeta(getTask(pid).status);
       const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
       const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
       const midY = (y1 + y2) / 2;
-      edges += `<path class="tree-edge" style="stroke:var(--status-${parentTask.status});" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentTask.status})"></path>`;
+      edges += `<path class="tree-edge" style="stroke:${parentMeta.color};" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
     });
   });
 
   let boxes = '';
   state.tasks.forEach(t => {
+    const meta = getStatusMeta(t.status);
     const badge = t.parents.length > 1 ? `<span class="tree-multi-badge" title="Depends on ${t.parents.length} parent tasks">⛓ ${t.parents.length}</span>` : '';
-    const warnCls = warnMap.has(t.id) ? ' warn-not-released' : '';
-    const warnTitle = warnMap.has(t.id) ? ` title="Not yet Released, but ${warnMap.get(t.id).map(c => c.id).join(', ')} already is/are."` : '';
-    boxes += `<div class="tree-box status-${t.status}${warnCls}" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;" data-id="${t.id}"${warnTitle}>
+    boxes += `<div class="tree-box" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;border-left-color:${meta.color};" data-id="${t.id}">
       <div class="tree-box-top">
         <span class="id-tag">${t.id}</span>
         <span class="tree-box-title">${escapeHtml(t.title)}</span>
@@ -1018,9 +1146,9 @@ function renderTree() {
   canvas.innerHTML = `
     <svg class="tree-svg-layer" width="${canvasW}" height="${canvasH}">
       <defs>
-        ${STATUS_ORDER.map(s => `
-        <marker id="tree-arrow-${s}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,0 L8,4 L0,8 z" style="fill:var(--status-${s});"></path>
+        ${getStatuses().map(s => `
+        <marker id="tree-arrow-${s.key}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" style="fill:${s.color};"></path>
         </marker>`).join('')}
       </defs>
       ${edges}
@@ -1037,17 +1165,18 @@ function renderTree() {
    ========================================================= */
 function renderKanban() {
   const board = document.getElementById('kanbanBoard');
-  const warnMap = computeUnreleasedParentWarnings();
-  board.innerHTML = STATUS_ORDER.map(status => {
-    const tasks = state.tasks.filter(t => t.status === status)
+  const statuses = getStatuses();
+  board.style.gridTemplateColumns = `repeat(${statuses.length}, minmax(200px, 1fr))`;
+  board.innerHTML = statuses.map(s => {
+    const tasks = state.tasks.filter(t => t.status === s.key)
       .sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
-    return `<div class="kanban-col" data-status="${status}">
-      <div class="kanban-col-header" style="color:var(--status-${status});">
-        <span>${STATUS_META[status].label}</span>
+    return `<div class="kanban-col" data-status="${s.key}">
+      <div class="kanban-col-header" style="color:${s.color};">
+        <span>${escapeHtml(s.label)}</span>
         <span class="kanban-col-count">${tasks.length}</span>
       </div>
-      <div class="kanban-col-body" data-status="${status}">
-        ${tasks.map(t => kanbanCardHtml(t, warnMap)).join('') || ''}
+      <div class="kanban-col-body" data-status="${s.key}">
+        ${tasks.map(t => kanbanCardHtml(t)).join('') || ''}
       </div>
     </div>`;
   }).join('');
@@ -1076,10 +1205,10 @@ function renderKanban() {
   });
 }
 
-function kanbanCardHtml(t, warnMap) {
+function kanbanCardHtml(t) {
+  const meta = getStatusMeta(t.status);
   const childCount = getDescendants(t.id).length;
-  const warnCls = warnMap.has(t.id) ? ' warn-not-released' : '';
-  return `<div class="kanban-card status-${t.status}${warnCls}" draggable="true" data-id="${t.id}">
+  return `<div class="kanban-card" style="border-left-color:${meta.color};" draggable="true" data-id="${t.id}">
     <div class="kanban-card-title">${escapeHtml(t.title)}</div>
     <div class="kanban-card-meta">
       <span class="kanban-card-id">${t.id}</span>
@@ -1094,7 +1223,7 @@ async function handleStatusDrop(taskId, newStatus) {
   if (!task || task.status === newStatus) { renderKanban(); return; }
   const applied = await promptAndApplyStatusChange(task, newStatus);
   renderAll();
-  if (applied) toast(`${task.id} → ${STATUS_META[newStatus].label}`);
+  if (applied) toast(`${task.id} → ${getStatusMeta(newStatus).label}`);
 }
 
 /* =========================================================
@@ -1136,17 +1265,19 @@ function renderTimeline() {
   const ruler = buildRuler(minDate, totalDays, pxPerDay);
 
   const rows = items.map(({ task, sched }) => {
+    const meta = getStatusMeta(task.status);
     const isMilestone = !(task.duration != null && task.duration > 0);
     const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
     let innerHtml;
 
     if (isMilestone) {
-      innerHtml = `<div class="timeline-milestone status-${task.status}" style="left:${left}px;" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
+      innerHtml = `<div class="timeline-milestone" style="left:${left}px;background-color:${meta.color};" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
     } else {
       const derived = sched.finishSource === 'derived';
       const runs = computeBusinessRuns(sched.start, sched.finish);
       const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
-      const cls = ['timeline-bar', `status-${task.status}`, derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
+      const colorStyle = derived ? `color:${meta.color};` : `background-color:${meta.color};`;
+      const cls = ['timeline-bar', derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
 
       const segHtml = runs.map(([runStart, runEnd], i) => {
         const segLeft = daysBetween(minDate, runStart) * pxPerDay + 1;
@@ -1159,14 +1290,14 @@ function renderTimeline() {
           ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
           : '';
         const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
-        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;" data-id="${task.id}" title="${escapeAttr(tooltip)}">${label}</div>`;
+        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" data-id="${task.id}" title="${escapeAttr(tooltip)}">${label}</div>`;
       }).join('');
 
       const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
         const nextStart = runs[i + 1][0];
         const bLeft = daysBetween(minDate, runEnd) * pxPerDay + pxPerDay - 1;
         const bWidth = daysBetween(runEnd, nextStart) * pxPerDay - pxPerDay + 2;
-        return `<div class="timeline-bar-bridge status-${task.status}" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;"></div>`;
+        return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${meta.color};"></div>`;
       }).join('');
 
       innerHtml = bridgeHtml + segHtml;
@@ -1192,7 +1323,7 @@ function renderTimeline() {
       <span><span class="legend-swatch"></span> Explicit deadline</span>
       <span><span class="legend-swatch dashed"></span> Calculated deadline</span>
       <span>◆ Milestone (no duration set)</span>
-      <span style="color:var(--status-rework);">Red outline = deadline conflict</span>
+      <span style="color:var(--danger);">Red outline = deadline conflict</span>
     </div>
   </div>`;
 
@@ -1234,6 +1365,7 @@ function buildRuler(minDate, totalDays, pxPerDay) {
    MASTER RENDER
    ========================================================= */
 function renderAll() {
+  renderStatusFilterChips();
   renderList();
   renderTree();
   renderKanban();
@@ -1483,7 +1615,7 @@ function loadExampleData() {
   const project = {
     id: generateProjectId(),
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
-    nextIdNum: 7,
+    nextIdNum: 8,
     tasks: [
       {
         id: 'T-1', title: 'Component design', link: 'https://example.com/design-doc',
@@ -1522,6 +1654,15 @@ function loadExampleData() {
         id: 'T-6', title: 'Assembly drawings', link: '',
         status: 'working', deadline: null, duration: 4, parents: ['T-1'],
         history: [{ date: addDays(t, -1), note: 'Task created — has no deadline of its own; scheduled forward once T-1 gets a calculated finish date from T-2.' }],
+        createdAt: nowISO(),
+      },
+      {
+        id: 'T-7', title: 'Kickoff meeting', link: '',
+        status: 'done', deadline: addDays(t, -22), duration: 1, parents: [],
+        history: [
+          { date: addDays(t, -22), note: 'Task created' },
+          { date: addDays(t, -22), note: 'Status changed: Working → Done' },
+        ],
         createdAt: nowISO(),
       },
     ],
@@ -1611,14 +1752,6 @@ function initToolbar() {
 
 function initListFilters() {
   document.getElementById('searchInput').oninput = e => { ui.search = e.target.value; renderList(); };
-  document.querySelectorAll('#statusFilterChips .chip').forEach(chip => {
-    chip.onclick = () => {
-      document.querySelectorAll('#statusFilterChips .chip').forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      ui.statusFilter = chip.dataset.status;
-      renderList();
-    };
-  });
 }
 
 function initTreeControls() {
@@ -1685,6 +1818,7 @@ function initModal() {
       document.getElementById('confirmOverlay').classList.remove('open');
       document.getElementById('statusChangeOverlay').classList.remove('open');
       document.getElementById('promptOverlay').classList.remove('open');
+      document.getElementById('statusSettingsOverlay').classList.remove('open');
       closeFirebaseModal();
     }
   });
@@ -1698,6 +1832,7 @@ function init() {
   initTreeControls();
   initModal();
   initSidebar();
+  initStatusSettings();
   renderAll();
 }
 
