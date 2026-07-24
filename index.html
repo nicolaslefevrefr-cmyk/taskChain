@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskChain — Suivi de tâches liées</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span class="brand-mark">⛓</span>
+        <span class="brand-name">TaskChain</span>
+      </div>
+      <input id="projectNameInput" class="project-name-input" type="text" value="Projet sans titre" spellcheck="false">
+    </div>
+
+    <div class="topbar-right">
+      <span id="saveIndicator" class="save-indicator">Enregistré</span>
+      <div class="btn-group">
+        <button class="btn btn-ghost" id="btnLoadExample" title="Charger un exemple">Exemple</button>
+        <button class="btn btn-ghost" id="btnImport" title="Charger un fichier JSON">Charger JSON</button>
+        <input type="file" id="fileImport" accept="application/json" hidden>
+        <button class="btn btn-ghost" id="btnExport" title="Enregistrer en JSON">Exporter JSON</button>
+        <button class="btn btn-ghost" id="btnReset" title="Nouveau projet vide">Nouveau</button>
+      </div>
+      <button class="btn btn-primary" id="btnNewTask">+ Nouvelle tâche</button>
+    </div>
+  </header>
+
+  <!-- ===================== TABS ===================== -->
+  <nav class="tabbar">
+    <button class="tab-btn active" data-tab="list">Liste</button>
+    <button class="tab-btn" data-tab="tree">Arbre</button>
+    <button class="tab-btn" data-tab="planning">Planning</button>
+    <button class="tab-btn" data-tab="retro">Rétroplanning</button>
+  </nav>
+
+  <main class="content">
+
+    <!-- ===================== TAB: LIST ===================== -->
+    <section class="tab-panel active" id="panel-list">
+      <div class="panel-toolbar">
+        <div class="search-box">
+          <input type="text" id="searchInput" placeholder="Rechercher une tâche…">
+        </div>
+        <div class="filter-chips" id="statusFilterChips">
+          <button class="chip chip-all active" data-status="all">Toutes</button>
+          <button class="chip status-working" data-status="working">Working</button>
+          <button class="chip status-release_process" data-status="release_process">In Release Process</button>
+          <button class="chip status-released" data-status="released">Released</button>
+          <button class="chip status-rework" data-status="rework">Rework</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="task-table">
+          <thead>
+            <tr>
+              <th class="col-id">ID</th>
+              <th class="col-title">Titre</th>
+              <th class="col-status">Statut</th>
+              <th class="col-deps">Dépend de (parents)</th>
+              <th class="col-deadline">Deadline</th>
+              <th class="col-duration">Durée</th>
+              <th class="col-link">Lien</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="taskTableBody"></tbody>
+        </table>
+        <div class="empty-state" id="listEmptyState" hidden>
+          <p>Aucune tâche pour le moment.</p>
+          <button class="btn btn-primary" id="btnEmptyNewTask">Créer la première tâche</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== TAB: TREE ===================== -->
+    <section class="tab-panel" id="panel-tree">
+      <div class="panel-toolbar">
+        <p class="panel-hint">Une tâche <strong>parente</strong> doit être terminée avant ses <strong>tâches enfant</strong>. Modifier le statut d'une tâche parente peut se propager à ses enfants.</p>
+        <div class="btn-group">
+          <button class="btn btn-ghost btn-sm" id="btnExpandAll">Tout déplier</button>
+          <button class="btn btn-ghost btn-sm" id="btnCollapseAll">Tout replier</button>
+        </div>
+      </div>
+      <div class="tree-wrap" id="treeWrap"></div>
+    </section>
+
+    <!-- ===================== TAB: PLANNING (Gantt/Kanban) ===================== -->
+    <section class="tab-panel" id="panel-planning">
+      <div class="planning-section">
+        <div class="panel-toolbar">
+          <p class="panel-hint">Glissez-déposez une tâche vers un autre statut. Le changement peut se propager aux tâches enfant.</p>
+        </div>
+        <div class="kanban-board" id="kanbanBoard"></div>
+      </div>
+
+      <div class="timeline-section">
+        <div class="panel-toolbar">
+          <h3 class="section-title">Chronologie</h3>
+          <p class="panel-hint">Barres calculées à partir de <em>deadline − durée</em> → <em>deadline</em>.</p>
+        </div>
+        <div class="timeline-wrap" id="timelineWrap"></div>
+      </div>
+    </section>
+
+    <!-- ===================== TAB: RETRO PLANNING ===================== -->
+    <section class="tab-panel" id="panel-retro">
+      <div class="panel-toolbar">
+        <p class="panel-hint">Calcul rétroactif : pour chaque tâche, date limite réelle nécessaire pour que toute la chaîne de tâches enfant respecte ses propres deadlines.</p>
+        <div class="chain-select-wrap">
+          <label for="chainSelect">Chaîne à visualiser (tâche finale) :</label>
+          <select id="chainSelect"></select>
+        </div>
+      </div>
+
+      <div class="chain-view" id="chainView"></div>
+
+      <h3 class="section-title" style="margin-top:32px;">Toutes les tâches — dates requises calculées</h3>
+      <div class="table-wrap">
+        <table class="task-table" id="retroTable">
+          <thead>
+            <tr>
+              <th class="col-id">ID</th>
+              <th class="col-title">Titre</th>
+              <th class="col-status">Statut</th>
+              <th>Deadline actuelle</th>
+              <th>Fin requise (calculée)</th>
+              <th>Début requis</th>
+              <th>État</th>
+            </tr>
+          </thead>
+          <tbody id="retroTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ===================== TASK MODAL ===================== -->
+<div class="modal-overlay" id="taskModalOverlay">
+  <div class="modal modal-task">
+    <div class="modal-header">
+      <h2 id="taskModalTitle">Nouvelle tâche</h2>
+      <button class="modal-close" id="taskModalClose">&times;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="taskFormId">
+
+      <div class="form-row">
+        <label for="taskTitle">Titre</label>
+        <input type="text" id="taskTitle" placeholder="ex : Design du composant">
+      </div>
+
+      <div class="form-row-split">
+        <div class="form-row">
+          <label for="taskStatus">Statut</label>
+          <select id="taskStatus">
+            <option value="working">Working</option>
+            <option value="release_process">In Release Process</option>
+            <option value="released">Released</option>
+            <option value="rework">Rework</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="taskLink">Lien</label>
+          <input type="url" id="taskLink" placeholder="https://…">
+        </div>
+      </div>
+
+      <div class="form-row-split">
+        <div class="form-row">
+          <label for="taskDeadline">Deadline</label>
+          <input type="date" id="taskDeadline">
+        </div>
+        <div class="form-row">
+          <label for="taskDuration">Durée (jours)</label>
+          <input type="number" id="taskDuration" min="0" step="1" placeholder="ex : 5">
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Tâches parentes <span class="label-hint">(doivent être terminées avant celle-ci)</span></label>
+        <div class="parent-picker" id="parentPicker"></div>
+      </div>
+
+      <div class="form-row" id="propagateRow" hidden>
+        <label class="checkbox-row">
+          <input type="checkbox" id="propagateCheckbox" checked>
+          Propager le nouveau statut aux tâches enfant
+        </label>
+      </div>
+
+      <div class="form-row">
+        <label>Historique</label>
+        <div class="history-list" id="historyList"></div>
+        <div class="history-add-row">
+          <input type="date" id="historyDateInput">
+          <input type="text" id="historyNoteInput" placeholder="Ajouter une note à l'historique…">
+          <button class="btn btn-ghost btn-sm" id="btnAddHistory">Ajouter</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger-ghost" id="btnDeleteTask" hidden>Supprimer la tâche</button>
+      <div class="modal-footer-right">
+        <button class="btn btn-ghost" id="btnCancelTask">Annuler</button>
+        <button class="btn btn-primary" id="btnSaveTask">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== GENERIC CONFIRM / CHOICE MODAL ===================== -->
+<div class="modal-overlay" id="confirmOverlay">
+  <div class="modal modal-confirm">
+    <div class="modal-body">
+      <p id="confirmMessage"></p>
+    </div>
+    <div class="modal-footer" id="confirmButtons"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
