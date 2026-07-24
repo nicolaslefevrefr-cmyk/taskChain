@@ -255,7 +255,8 @@ a{color:var(--accent);}
   position:relative;transform-origin:0 0;padding:32px;
 }
 .tree-svg-layer{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}
-.tree-edge{fill:none;stroke:var(--border-strong);stroke-width:1.6;}
+.tree-edge{fill:none;stroke:var(--border-strong);stroke-width:1.6;transition:stroke-width .12s ease;}
+.tree-edge.tree-edge-highlight{stroke-width:3.4;}
 .tree-box{
   position:absolute;box-sizing:border-box;border-radius:var(--radius-sm);
   border:1px solid var(--border);border-left:4px solid var(--border-strong);

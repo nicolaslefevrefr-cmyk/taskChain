@@ -39,7 +39,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.5';
+const APP_VERSION = 'v1.6';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -1119,7 +1119,20 @@ function renderTree() {
       const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
       const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
       const midY = (y1 + y2) / 2;
-      edges += `<path class="tree-edge" style="stroke:${parentMeta.color};" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
+
+      // An edge that skips more than one level runs a real risk of
+      // passing straight through a box sitting at an intermediate level
+      // (most visibly when both ends share the same column). Bow it
+      // sideways so it curves around instead of cutting through.
+      const levelSpan = positions[t.id].level - positions[pid].level;
+      let c1x = x1, c2x = x2;
+      if (levelSpan > 1) {
+        const dir = (hashCode(pid + '>' + t.id) % 2 === 0) ? 1 : -1;
+        const bow = Math.min(70, 16 * (levelSpan - 1)) * dir;
+        c1x += bow; c2x += bow;
+      }
+
+      edges += `<path class="tree-edge" data-parent="${pid}" data-child="${t.id}" style="stroke:${parentMeta.color};" d="M ${x1} ${y1} C ${c1x} ${midY}, ${c2x} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
     });
   });
 
@@ -1156,8 +1169,20 @@ function renderTree() {
     ${boxes}`;
 
   canvas.querySelectorAll('.tree-box').forEach(el => {
-    el.onclick = () => openTaskModal(el.dataset.id);
+    const id = el.dataset.id;
+    el.onclick = () => openTaskModal(id);
+    const connectedEdges = () => canvas.querySelectorAll(`.tree-edge[data-parent="${id}"], .tree-edge[data-child="${id}"]`);
+    el.addEventListener('mouseenter', () => connectedEdges().forEach(edge => edge.classList.add('tree-edge-highlight')));
+    el.addEventListener('mouseleave', () => connectedEdges().forEach(edge => edge.classList.remove('tree-edge-highlight')));
   });
+}
+
+// Small deterministic string hash, used to pick a stable left/right bow
+// direction per edge (so the same edge always curves the same way).
+function hashCode(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return Math.abs(h);
 }
 
 /* =========================================================
@@ -1529,14 +1554,14 @@ function persistFirebaseConfigIfChecked(cfg) {
   }
 }
 
-async function handleFirebaseSave() {
-  const cfg = readFirebaseFormConfig();
-  if (!cfg.apiKey || !cfg.projectId || !cfg.appId) {
-    setFirebaseStatus('Please fill in at least the API key, Project ID and App ID.', true);
-    return;
+async function saveWorkspaceToFirebase(cfg, opts) {
+  const showModalStatus = !!(opts && opts.showModalStatus);
+  if (!cfg || !cfg.apiKey || !cfg.projectId || !cfg.appId) {
+    const msg = 'Please fill in at least the API key, Project ID and App ID.';
+    if (showModalStatus) setFirebaseStatus(msg, true); else toast(msg);
+    return false;
   }
-  persistFirebaseConfigIfChecked(cfg);
-  setFirebaseStatus('Connecting…', false);
+  if (showModalStatus) setFirebaseStatus('Connecting…', false);
   try {
     await ensureFirebaseReady(cfg);
     const db = firebase.firestore();
@@ -1545,11 +1570,32 @@ async function handleFirebaseSave() {
       projectCount: workspace.projects.length,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
-    setFirebaseStatus(`Saved ${workspace.projects.length} project(s) to Firebase as "${cfg.docId}".`, false);
+    const msg = `Saved ${workspace.projects.length} project(s) to Firebase as "${cfg.docId}".`;
+    if (showModalStatus) setFirebaseStatus(msg, false);
     toast('Workspace saved to Firebase.');
+    return true;
   } catch (e) {
-    setFirebaseStatus('Save failed: ' + (e.message || e), true);
+    const msg = 'Save failed: ' + (e.message || e);
+    if (showModalStatus) setFirebaseStatus(msg, true); else toast(msg);
+    return false;
   }
+}
+
+async function handleFirebaseSave() {
+  const cfg = readFirebaseFormConfig();
+  persistFirebaseConfigIfChecked(cfg);
+  await saveWorkspaceToFirebase(cfg, { showModalStatus: true });
+}
+
+async function handleQuickSave() {
+  const cfg = getStoredFirebaseConfig();
+  if (!cfg || !cfg.apiKey || !cfg.projectId || !cfg.appId) {
+    toast('Set up your Firebase connection first.');
+    openFirebaseModal();
+    return;
+  }
+  toast('Saving to Firebase…');
+  await saveWorkspaceToFirebase(cfg, { showModalStatus: false });
 }
 
 async function handleFirebaseLoad() {
@@ -1727,6 +1773,7 @@ function initToolbar() {
     renderSidebar();
   };
 
+  document.getElementById('btnQuickSave').onclick = handleQuickSave;
   document.getElementById('btnFirebase').onclick = openFirebaseModal;
   document.getElementById('firebaseModalClose').onclick = closeFirebaseModal;
   document.getElementById('firebaseModalOverlay').addEventListener('click', e => {
