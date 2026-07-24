@@ -15,7 +15,7 @@ const STATUS_META = {
 const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
 const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagram scale
 const STORAGE_KEY = 'taskchain_state_v2';
-const APP_VERSION = 'v1.2';
+const APP_VERSION = 'v1.3';
 
 /* ---------- State ---------- */
 let state = loadState() || createEmptyState();
@@ -786,10 +786,11 @@ function renderTree() {
   state.tasks.forEach(t => {
     t.parents.forEach(pid => {
       if (!positions[pid]) return;
+      const parentTask = getTask(pid);
       const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
       const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
       const midY = (y1 + y2) / 2;
-      edges += `<path class="tree-edge" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow)"></path>`;
+      edges += `<path class="tree-edge" style="stroke:var(--status-${parentTask.status});" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentTask.status})"></path>`;
     });
   });
 
@@ -817,9 +818,10 @@ function renderTree() {
   canvas.innerHTML = `
     <svg class="tree-svg-layer" width="${canvasW}" height="${canvasH}">
       <defs>
-        <marker id="tree-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,0 L8,4 L0,8 z" fill="var(--border-strong)"></path>
-        </marker>
+        ${STATUS_ORDER.map(s => `
+        <marker id="tree-arrow-${s}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" style="fill:var(--status-${s});"></path>
+        </marker>`).join('')}
       </defs>
       ${edges}
     </svg>

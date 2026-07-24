@@ -139,10 +139,11 @@ a{color:var(--accent);}
 }
 
 .warning-banner{
-  display:flex;gap:8px;align-items:flex-start;background:var(--warn-bg);
+  display:none;gap:8px;align-items:flex-start;background:var(--warn-bg);
   border:1px dashed var(--warn-border);color:var(--warn);border-radius:var(--radius-sm);
   padding:9px 12px;font-size:12.5px;margin-bottom:16px;
 }
+.warning-banner:not([hidden]){display:flex;}
 
 /* =========================================================
    STATUS BADGES / CHIPS
