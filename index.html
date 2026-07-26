@@ -77,12 +77,12 @@
         <table class="task-table">
           <thead>
             <tr>
-              <th class="col-id">ID</th>
-              <th class="col-title">Title</th>
-              <th class="col-status">Status</th>
+              <th class="col-id sortable" data-sort="id">ID <span class="sort-arrow"></span></th>
+              <th class="col-title sortable" data-sort="title">Title <span class="sort-arrow"></span></th>
+              <th class="col-status sortable" data-sort="status">Status <span class="sort-arrow"></span></th>
               <th class="col-deps">Depends on (parents)</th>
-              <th class="col-deadline">Deadline</th>
-              <th class="col-duration">Duration</th>
+              <th class="col-deadline sortable" data-sort="deadline">Deadline <span class="sort-arrow"></span></th>
+              <th class="col-duration sortable" data-sort="duration">Duration <span class="sort-arrow"></span></th>
               <th class="col-link">Link</th>
               <th class="col-actions"></th>
             </tr>
@@ -99,11 +99,12 @@
     <!-- ===================== TAB: TREE ===================== -->
     <section class="tab-panel" id="panel-tree">
       <div class="panel-toolbar">
-        <p class="panel-hint">Boxes are tasks, arrows point from a parent to the child(ren) that depend on it — a parent must finish before its children can start.</p>
+        <p class="panel-hint">Boxes are tasks, arrows point from a parent to the child(ren) that depend on it — a parent must finish before its children can start. Drag a box to reposition it (saved automatically); double-click it to snap back to the automatic layout.</p>
         <div class="btn-group">
           <button class="btn btn-ghost btn-sm" id="btnTreeZoomOut" title="Zoom out">−</button>
           <button class="btn btn-ghost btn-sm" id="btnTreeZoomIn" title="Zoom in">+</button>
           <button class="btn btn-ghost btn-sm" id="btnTreeFit" title="Reset zoom and scroll">Fit</button>
+          <button class="btn btn-ghost btn-sm" id="btnTreeResetLayout" title="Reset every manually-positioned box back to automatic">Reset layout</button>
         </div>
       </div>
       <div class="tree-canvas-wrap" id="treeCanvasWrap">

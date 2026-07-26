@@ -64,7 +64,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.7';
+const APP_VERSION = 'v1.8';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -82,6 +82,8 @@ let ui = {
   dragTaskId: null,
   zoomIndex: 4,
   treeZoomIndex: 3,
+  sortColumn: 'id',
+  sortDirection: 'asc',
 };
 
 function generateProjectId() {
@@ -956,6 +958,13 @@ async function handleDeleteTask() {
 /* =========================================================
    RENDER: LIST
    ========================================================= */
+function compareNullsLast(a, b, cmpFn) {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return cmpFn(a, b);
+}
+
 function getFilteredTasks() {
   let list = state.tasks.slice();
   if (ui.statusFilter !== 'all') list = list.filter(t => t.status === ui.statusFilter);
@@ -963,10 +972,30 @@ function getFilteredTasks() {
     const q = ui.search.trim().toLowerCase();
     list = list.filter(t => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q));
   }
-  return list.sort((a, b) => {
-    const na = parseInt(a.id.split('-')[1], 10), nb = parseInt(b.id.split('-')[1], 10);
-    return na - nb;
+
+  const schedule = computeSchedule();
+  const statusOrder = getStatuses().map(s => s.key);
+  const dir = ui.sortDirection === 'desc' ? -1 : 1;
+  const effectiveDeadline = (t) => t.deadline || (schedule[t.id] && schedule[t.id].finish) || null;
+
+  list.sort((a, b) => {
+    switch (ui.sortColumn) {
+      case 'title':
+        return a.title.localeCompare(b.title) * dir;
+      case 'status':
+        return (statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status)) * dir;
+      case 'deadline':
+        return compareNullsLast(effectiveDeadline(a), effectiveDeadline(b), (x, y) => x.localeCompare(y) * dir);
+      case 'duration':
+        return compareNullsLast(a.duration ?? null, b.duration ?? null, (x, y) => (x - y) * dir);
+      case 'id':
+      default: {
+        const na = parseInt(a.id.split('-')[1], 10), nb = parseInt(b.id.split('-')[1], 10);
+        return (na - nb) * dir;
+      }
+    }
   });
+  return list;
 }
 
 function renderList() {
@@ -1019,6 +1048,36 @@ function renderList() {
 
   tbody.querySelectorAll('[data-open]').forEach(el => {
     el.onclick = () => openTaskModal(el.dataset.open);
+  });
+
+  updateSortHeaders();
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('#panel-list thead th.sortable').forEach(th => {
+    const arrow = th.querySelector('.sort-arrow');
+    if (th.dataset.sort === ui.sortColumn) {
+      arrow.textContent = ui.sortDirection === 'asc' ? '▲' : '▼';
+      th.classList.add('sorted');
+    } else {
+      arrow.textContent = '';
+      th.classList.remove('sorted');
+    }
+  });
+}
+
+function initListSorting() {
+  document.querySelectorAll('#panel-list thead th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      if (ui.sortColumn === col) {
+        ui.sortDirection = ui.sortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        ui.sortColumn = col;
+        ui.sortDirection = 'asc';
+      }
+      renderList();
+    });
   });
 }
 
@@ -1130,22 +1189,41 @@ function renderTree() {
   }
 
   const { positions, maxLevel, maxCount } = computeTreeLayout();
+  const autoX = (id) => TREE_PAD + positions[id].order * (TREE_BOX_W + TREE_H_GAP);
+  const autoY = (id) => TREE_PAD + positions[id].level * (TREE_BOX_H + TREE_V_GAP);
 
-  const canvasW = maxCount * (TREE_BOX_W + TREE_H_GAP) - TREE_H_GAP + TREE_PAD * 2;
-  const canvasH = (maxLevel + 1) * (TREE_BOX_H + TREE_V_GAP) - TREE_V_GAP + TREE_PAD * 2;
+  // Effective position: a manually-dragged task keeps its saved spot
+  // (task.treePos); everything else falls back to the computed slot.
+  const pos = {};
+  state.tasks.forEach(t => {
+    pos[t.id] = t.treePos ? { x: t.treePos.x, y: t.treePos.y } : { x: autoX(t.id), y: autoY(t.id) };
+  });
 
-  const px = (id) => TREE_PAD + positions[id].order * (TREE_BOX_W + TREE_H_GAP);
-  const py = (id) => TREE_PAD + positions[id].level * (TREE_BOX_H + TREE_V_GAP);
+  let canvasW = maxCount * (TREE_BOX_W + TREE_H_GAP) - TREE_H_GAP + TREE_PAD * 2;
+  let canvasH = (maxLevel + 1) * (TREE_BOX_H + TREE_V_GAP) - TREE_V_GAP + TREE_PAD * 2;
+  Object.values(pos).forEach(p => {
+    canvasW = Math.max(canvasW, p.x + TREE_BOX_W + TREE_PAD);
+    canvasH = Math.max(canvasH, p.y + TREE_BOX_H + TREE_PAD);
+  });
+
+  // Rebuilds one edge's path from the CURRENT contents of `pos`, so it
+  // can be called live while a box is being dragged, not just at render
+  // time. The arrowhead's own orientation follows automatically — its
+  // marker uses orient="auto-start-reverse", which SVG derives from the
+  // path's tangent, so it always points the right way as the curve moves.
+  function edgeD(pid, cid) {
+    const x1 = pos[pid].x + TREE_BOX_W / 2, y1 = pos[pid].y + TREE_BOX_H;
+    const x2 = pos[cid].x + TREE_BOX_W / 2, y2 = pos[cid].y;
+    const midY = (y1 + y2) / 2;
+    return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+  }
 
   let edges = '';
   state.tasks.forEach(t => {
     t.parents.forEach(pid => {
-      if (!positions[pid]) return;
+      if (!pos[pid]) return;
       const parentMeta = getStatusMeta(getTask(pid).status);
-      const x1 = px(pid) + TREE_BOX_W / 2, y1 = py(pid) + TREE_BOX_H;
-      const x2 = px(t.id) + TREE_BOX_W / 2, y2 = py(t.id);
-      const midY = (y1 + y2) / 2;
-      edges += `<path class="tree-edge" data-parent="${pid}" data-child="${t.id}" style="stroke:${readableStatusColor(parentMeta.color)};" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
+      edges += `<path class="tree-edge" data-parent="${pid}" data-child="${t.id}" style="stroke:${readableStatusColor(parentMeta.color)};" d="${edgeD(pid, t.id)}" marker-end="url(#tree-arrow-${parentMeta.key})"></path>`;
     });
   });
 
@@ -1153,10 +1231,12 @@ function renderTree() {
   state.tasks.forEach(t => {
     const meta = getStatusMeta(t.status);
     const badge = t.parents.length > 1 ? `<span class="tree-multi-badge" title="Depends on ${t.parents.length} parent tasks">⛓ ${t.parents.length}</span>` : '';
-    boxes += `<div class="tree-box" style="left:${px(t.id)}px;top:${py(t.id)}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;border-left-color:${readableStatusColor(meta.color)};" data-id="${t.id}">
+    const pin = t.treePos ? `<span class="tree-pin" title="Manually positioned — double-click to reset">📌</span>` : '';
+    boxes += `<div class="tree-box" style="left:${pos[t.id].x}px;top:${pos[t.id].y}px;width:${TREE_BOX_W}px;height:${TREE_BOX_H}px;border-left-color:${readableStatusColor(meta.color)};" data-id="${t.id}" title="Drag to reposition · double-click to reset">
       <div class="tree-box-top">
         <span class="id-tag">${t.id}</span>
         <span class="tree-box-title">${escapeHtml(t.title)}</span>
+        ${pin}
       </div>
       <div class="tree-box-bottom">
         ${statusBadge(t.status)}
@@ -1183,10 +1263,78 @@ function renderTree() {
 
   canvas.querySelectorAll('.tree-box').forEach(el => {
     const id = el.dataset.id;
-    el.onclick = () => openTaskModal(id);
     const connectedEdges = () => canvas.querySelectorAll(`.tree-edge[data-parent="${id}"], .tree-edge[data-child="${id}"]`);
+
     el.addEventListener('mouseenter', () => connectedEdges().forEach(edge => edge.classList.add('tree-edge-highlight')));
     el.addEventListener('mouseleave', () => connectedEdges().forEach(edge => edge.classList.remove('tree-edge-highlight')));
+
+    el.addEventListener('click', () => {
+      if (treeJustDragged) { treeJustDragged = false; return; }
+      openTaskModal(id);
+    });
+
+    el.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      const task = getTask(id);
+      if (task.treePos) {
+        delete task.treePos;
+        saveState();
+        renderTree();
+      }
+    });
+
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      treeDrag = {
+        id,
+        startScreenX: e.clientX,
+        startScreenY: e.clientY,
+        startX: pos[id].x,
+        startY: pos[id].y,
+        moved: false,
+        onMove: (newX, newY) => {
+          pos[id].x = newX; pos[id].y = newY;
+          el.style.left = newX + 'px';
+          el.style.top = newY + 'px';
+          connectedEdges().forEach(edge => {
+            edge.setAttribute('d', edgeD(edge.dataset.parent, edge.dataset.child));
+          });
+        },
+        onEnd: () => {
+          if (!treeDrag.moved) return;
+          treeJustDragged = true;
+          getTask(id).treePos = { x: pos[id].x, y: pos[id].y };
+          saveState();
+          renderTree();
+        },
+      };
+    });
+  });
+}
+
+// Drag state lives at module scope (not inside renderTree) so a single
+// pair of document-level mousemove/mouseup listeners — registered once
+// in initTreeControls() — can drive it regardless of which render
+// created the box currently being dragged.
+let treeDrag = null;
+let treeJustDragged = false;
+
+function initTreeDragHandlers() {
+  document.addEventListener('mousemove', (e) => {
+    if (!treeDrag) return;
+    const dxScreen = e.clientX - treeDrag.startScreenX;
+    const dyScreen = e.clientY - treeDrag.startScreenY;
+    if (Math.abs(dxScreen) > 3 || Math.abs(dyScreen) > 3) treeDrag.moved = true;
+    const zoom = TREE_ZOOM_LEVELS[ui.treeZoomIndex];
+    const newX = Math.max(TREE_PAD, treeDrag.startX + dxScreen / zoom);
+    const newY = Math.max(TREE_PAD, treeDrag.startY + dyScreen / zoom);
+    treeDrag.onMove(newX, newY);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!treeDrag) return;
+    treeDrag.onEnd();
+    treeDrag = null;
   });
 }
 
@@ -1822,6 +1970,19 @@ function initTreeControls() {
     renderTree();
     document.getElementById('treeCanvasWrap').scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   };
+  document.getElementById('btnTreeResetLayout').onclick = async () => {
+    const movedCount = state.tasks.filter(t => t.treePos).length;
+    if (!movedCount) { toast('No boxes have been manually moved.'); return; }
+    const choice = await showConfirm(`Reset ${movedCount} manually-positioned box(es) back to the automatic layout?`, [
+      { label: 'Cancel', value: 'no' },
+      { label: 'Reset layout', value: 'yes', primary: true },
+    ]);
+    if (choice !== 'yes') return;
+    state.tasks.forEach(t => { delete t.treePos; });
+    saveState();
+    renderTree();
+  };
+  initTreeDragHandlers();
 }
 
 function initModal() {
@@ -1883,6 +2044,7 @@ function init() {
   initTabs();
   initToolbar();
   initListFilters();
+  initListSorting();
   initTreeControls();
   initModal();
   initSidebar();
