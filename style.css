@@ -281,6 +281,44 @@ a{color:var(--accent);}
 .tree-empty-note{padding:24px;text-align:center;color:var(--text-tertiary);}
 
 /* =========================================================
+   CATEGORY TAB — classic indented tree (create/rename/delete/move)
+   ========================================================= */
+.category-tree-wrap{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;min-height:160px;transition:background .12s;
+}
+.category-tree-wrap.drag-over-root{background:var(--accent-light);}
+.cat-root-list{display:flex;flex-direction:column;gap:2px;}
+.cat-node{position:relative;}
+.cat-row{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:var(--radius-sm);}
+.cat-toggle{
+  width:18px;height:22px;flex-shrink:0;border:none;background:transparent;cursor:pointer;
+  color:var(--text-tertiary);font-size:11px;display:flex;align-items:center;justify-content:center;border-radius:3px;
+}
+.cat-toggle:hover{background:var(--border);}
+.cat-toggle.leaf{visibility:hidden;}
+.cat-card{
+  display:flex;align-items:center;gap:10px;flex:1;min-width:0;padding:6px 10px;
+  border-radius:var(--radius-sm);background:var(--surface-alt);cursor:grab;
+}
+.cat-card:active{cursor:grabbing;}
+.cat-row.dragging .cat-card{opacity:.4;}
+.cat-row.drag-over .cat-card{outline:2px dashed var(--accent);outline-offset:1px;}
+.cat-name{font-weight:500;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cat-count{margin-left:auto;font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono);flex-shrink:0;}
+.cat-actions{display:none;gap:2px;flex-shrink:0;}
+.cat-row:hover .cat-actions{display:flex;}
+.cat-actions button{
+  border:none;background:transparent;cursor:pointer;color:var(--text-tertiary);
+  padding:3px 6px;border-radius:4px;font-size:12px;
+}
+.cat-actions button:hover{background:var(--border);color:var(--text);}
+.cat-children{
+  margin-left:26px;padding-left:16px;border-left:1px dashed var(--border-strong);
+  display:flex;flex-direction:column;gap:2px;margin-top:2px;
+}
+
+/* =========================================================
    KANBAN / PLANNING
    ========================================================= */
 .planning-section{margin-bottom:36px;}
@@ -423,13 +461,30 @@ a{color:var(--accent);}
 .checkbox-row input{width:auto;}
 
 .parent-picker{
-  border:1px solid var(--border);border-radius:var(--radius-sm);max-height:150px;overflow-y:auto;
+  border:1px solid var(--border);border-radius:var(--radius-sm);max-height:230px;overflow-y:auto;
   padding:6px;
 }
-.parent-picker-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;font-size:13px;}
+.parent-picker-item{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:4px;font-size:13px;}
 .parent-picker-item:hover{background:var(--surface-alt);}
-.parent-picker-item input{width:auto;}
+.parent-picker-item input{width:auto;flex-shrink:0;}
 .parent-picker-empty{color:var(--text-tertiary);padding:8px;font-size:12.5px;}
+
+.picker-cat-node{margin-bottom:1px;}
+.picker-cat-header{display:flex;align-items:center;gap:5px;padding:4px 6px;border-radius:4px;}
+.picker-cat-header:hover{background:var(--surface-alt);}
+.picker-cat-toggle{
+  border:none;background:transparent;cursor:pointer;color:var(--text-tertiary);
+  font-size:10px;width:14px;flex-shrink:0;padding:0;
+}
+.picker-cat-label{font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.03em;}
+
+.category-picker{
+  border:1px solid var(--border);border-radius:var(--radius-sm);max-height:150px;overflow-y:auto;padding:6px;
+}
+.category-picker-item{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:4px;font-size:13px;}
+.category-picker-item:hover{background:var(--surface-alt);}
+.category-picker-item input{width:auto;flex-shrink:0;}
+.category-picker-empty{color:var(--text-tertiary);padding:8px;font-size:12.5px;}
 
 .history-list{display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;margin-bottom:8px;}
 .history-item{

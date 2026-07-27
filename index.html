@@ -60,6 +60,7 @@
         <button class="tab-btn active" data-tab="list">List</button>
         <button class="tab-btn" data-tab="tree">Tree</button>
         <button class="tab-btn" data-tab="planning">Planning</button>
+        <button class="tab-btn" data-tab="category">Category</button>
       </nav>
 
       <main class="content">
@@ -136,6 +137,15 @@
       </div>
     </section>
 
+    <!-- ===================== TAB: CATEGORY ===================== -->
+    <section class="tab-panel" id="panel-category">
+      <div class="panel-toolbar">
+        <p class="panel-hint">Organize tasks into categories, then assign a task to one or more of them from its edit window. Drag a category onto another to nest it; drop it on the empty background to move it back to the top level.</p>
+        <button class="btn btn-primary btn-sm" id="btnNewCategory">+ New category</button>
+      </div>
+      <div class="category-tree-wrap" id="categoryTreeWrap"></div>
+    </section>
+
       </main>
     </div>
   </div>
@@ -180,7 +190,12 @@
       </div>
 
       <div class="form-row">
-        <label>Parent tasks <span class="label-hint">(must be finished before this one can start)</span></label>
+        <label>Categories <span class="label-hint">(how this task is classified)</span></label>
+        <div class="category-picker" id="categoryPicker"></div>
+      </div>
+
+      <div class="form-row">
+        <label>Parent tasks <span class="label-hint">(must be finished before this one can start) — grouped by category</span></label>
         <div class="parent-picker" id="parentPicker"></div>
       </div>
 

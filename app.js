@@ -64,7 +64,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.8';
+const APP_VERSION = 'v1.9';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -84,6 +84,7 @@ let ui = {
   treeZoomIndex: 3,
   sortColumn: 'id',
   sortDirection: 'asc',
+  collapsedCategories: new Set(),
 };
 
 function generateProjectId() {
@@ -94,6 +95,7 @@ function createEmptyProject(name) {
     id: generateProjectId(),
     meta: { projectName: name || 'Untitled project', lastModified: nowISO() },
     tasks: [],
+    categories: [],
     nextIdNum: 1,
   };
 }
@@ -116,7 +118,8 @@ function todayStr() {
    ========================================================= */
 function normalizeProject(p) {
   p.tasks = p.tasks || [];
-  p.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; });
+  p.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; t.categories = t.categories || []; });
+  p.categories = p.categories || [];
   if (!p.meta) p.meta = { projectName: 'Imported project', lastModified: nowISO() };
   if (!p.meta.projectName) p.meta.projectName = 'Imported project';
   if (!p.nextIdNum) {
@@ -302,6 +305,201 @@ function getAncestors(taskId, visited = new Set()) {
 }
 
 /* =========================================================
+   CATEGORIES
+   Per-project, strictly hierarchical (single parent per category —
+   unlike tasks, there's no need for a DAG here). Used purely to
+   classify and help locate tasks; it doesn't feed the schedule engine
+   or any cascade logic at all.
+   ========================================================= */
+function generateCategoryId() {
+  return 'cat' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function getCategories() { return state.categories; }
+function getCategory(id) { return getCategories().find(c => c.id === id); }
+function getCategoryChildren(parentId) {
+  return getCategories().filter(c => c.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name));
+}
+function getCategoryDescendantIds(id, visited = new Set()) {
+  const result = [];
+  getCategoryChildren(id).forEach(c => {
+    if (visited.has(c.id)) return;
+    visited.add(c.id);
+    result.push(c.id);
+    result.push(...getCategoryDescendantIds(c.id, visited));
+  });
+  return result;
+}
+function isCategoryOrDescendant(candidateId, ofId) {
+  return candidateId === ofId || getCategoryDescendantIds(ofId).includes(candidateId);
+}
+// Does this category (or any of its subcategories) contain at least one
+// of the given tasks? Used to skip empty branches in the parent picker.
+function categoryHasTasks(cat, taskList) {
+  if (taskList.some(t => (t.categories || []).includes(cat.id))) return true;
+  return getCategoryChildren(cat.id).some(c => categoryHasTasks(c, taskList));
+}
+
+async function handleAddCategory(parentId) {
+  const name = await showPrompt(parentId ? 'New subcategory name' : 'New category name', 'New category');
+  if (name === null) return;
+  state.categories.push({ id: generateCategoryId(), name: name.trim() || 'New category', parentId: parentId || null });
+  if (parentId) ui.collapsedCategories.delete(parentId);
+  saveState();
+  renderCategoryTab();
+}
+
+async function handleRenameCategory(id) {
+  const cat = getCategory(id);
+  if (!cat) return;
+  const name = await showPrompt('Rename category', cat.name);
+  if (name === null) return;
+  cat.name = name.trim() || cat.name;
+  saveState();
+  renderCategoryTab();
+}
+
+async function handleDeleteCategory(id) {
+  const cat = getCategory(id);
+  if (!cat) return;
+  const descendantIds = getCategoryDescendantIds(id);
+  const affectedIds = [id, ...descendantIds];
+  const affectedTaskCount = state.tasks.filter(t => (t.categories || []).some(cid => affectedIds.includes(cid))).length;
+
+  let msg = `Delete category "${cat.name}"`;
+  if (descendantIds.length) msg += ` and its ${descendantIds.length} subcategor${descendantIds.length === 1 ? 'y' : 'ies'}`;
+  msg += '?';
+  if (affectedTaskCount) msg += ` ${affectedTaskCount} task(s) will be uncategorized from it.`;
+
+  const choice = await showConfirm(msg, [
+    { label: 'Cancel', value: 'no' },
+    { label: 'Delete', value: 'delete', danger: true, primary: true },
+  ]);
+  if (choice !== 'delete') return;
+
+  state.categories = state.categories.filter(c => !affectedIds.includes(c.id));
+  state.tasks.forEach(t => { t.categories = (t.categories || []).filter(cid => !affectedIds.includes(cid)); });
+  saveState();
+  renderCategoryTab();
+  toast('Category deleted.');
+}
+
+function moveCategoryTo(categoryId, newParentId) {
+  if (categoryId === newParentId) return false;
+  const cat = getCategory(categoryId);
+  if (!cat) return false;
+  if (newParentId && isCategoryOrDescendant(newParentId, categoryId)) return false; // would create a cycle
+  cat.parentId = newParentId || null;
+  saveState();
+  renderCategoryTab();
+  return true;
+}
+
+function renderCategoryTab() {
+  const wrap = document.getElementById('categoryTreeWrap');
+  const roots = getCategoryChildren(null);
+
+  if (!getCategories().length) {
+    wrap.innerHTML = '<div class="empty-state"><p>No categories yet.</p><button class="btn btn-primary" id="btnEmptyNewCategory">Create your first category</button></div>';
+    document.getElementById('btnEmptyNewCategory').onclick = () => handleAddCategory(null);
+    wireCategoryRootDrop(wrap);
+    return;
+  }
+
+  const container = document.createElement('div');
+  container.className = 'cat-root-list';
+  roots.forEach(c => container.appendChild(renderCategoryNode(c)));
+  wrap.innerHTML = '';
+  wrap.appendChild(container);
+  wireCategoryRootDrop(wrap);
+}
+
+function renderCategoryNode(cat) {
+  const node = document.createElement('div');
+  node.className = 'cat-node';
+
+  const children = getCategoryChildren(cat.id);
+  const collapsed = ui.collapsedCategories.has(cat.id);
+  const taskCount = state.tasks.filter(t => (t.categories || []).includes(cat.id)).length;
+
+  const row = document.createElement('div');
+  row.className = 'cat-row';
+  row.dataset.id = cat.id;
+
+  const toggle = document.createElement('button');
+  toggle.className = 'cat-toggle' + (children.length ? '' : ' leaf');
+  toggle.textContent = collapsed ? '▶' : '▼';
+  toggle.onclick = () => {
+    if (collapsed) ui.collapsedCategories.delete(cat.id); else ui.collapsedCategories.add(cat.id);
+    renderCategoryTab();
+  };
+  row.appendChild(toggle);
+
+  const card = document.createElement('div');
+  card.className = 'cat-card';
+  card.draggable = true;
+  card.innerHTML = `
+    <span class="cat-name">${escapeHtml(cat.name)}</span>
+    <span class="cat-count">${taskCount} task${taskCount === 1 ? '' : 's'}</span>
+    <span class="cat-actions">
+      <button data-action="add" title="Add subcategory">+</button>
+      <button data-action="rename" title="Rename">✏</button>
+      <button data-action="delete" title="Delete">🗑</button>
+    </span>`;
+  card.querySelectorAll('[data-action]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      if (action === 'add') handleAddCategory(cat.id);
+      else if (action === 'rename') handleRenameCategory(cat.id);
+      else if (action === 'delete') handleDeleteCategory(cat.id);
+    };
+  });
+  row.appendChild(card);
+  node.appendChild(row);
+
+  card.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', cat.id);
+    e.dataTransfer.effectAllowed = 'move';
+    row.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => row.classList.remove('dragging'));
+  card.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); row.classList.add('drag-over'); });
+  card.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+  card.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation();
+    row.classList.remove('drag-over');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    if (!draggedId || draggedId === cat.id) return;
+    if (!moveCategoryTo(draggedId, cat.id)) toast("Can't move a category into its own subcategory.");
+  });
+
+  if (children.length && !collapsed) {
+    const childWrap = document.createElement('div');
+    childWrap.className = 'cat-children';
+    children.forEach(c => childWrap.appendChild(renderCategoryNode(c)));
+    node.appendChild(childWrap);
+  }
+
+  return node;
+}
+
+// Dropping on the empty tree background (not on any category card)
+// moves a category back to the top level.
+function wireCategoryRootDrop(wrap) {
+  wrap.addEventListener('dragover', e => { e.preventDefault(); wrap.classList.add('drag-over-root'); });
+  wrap.addEventListener('dragleave', e => { if (e.target === wrap) wrap.classList.remove('drag-over-root'); });
+  wrap.addEventListener('drop', e => {
+    wrap.classList.remove('drag-over-root');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    if (draggedId) moveCategoryTo(draggedId, null);
+  });
+}
+
+function initCategoryTab() {
+  document.getElementById('btnNewCategory').onclick = () => handleAddCategory(null);
+}
+
+/* =========================================================
    SCHEDULE ENGINE
    For every task computes { finish, finishSource, start, conflict }.
    Dates propagate in BOTH directions and the whole graph is relaxed
@@ -421,6 +619,7 @@ function upsertTaskFromForm() {
   const durationRaw = document.getElementById('taskDuration').value;
   const duration = durationRaw === '' ? null : Math.max(0, parseInt(durationRaw, 10));
   const parents = Array.from(document.querySelectorAll('#parentPicker input[type=checkbox]:checked')).map(cb => cb.value);
+  const categories = Array.from(document.querySelectorAll('#categoryPicker input[type=checkbox]:checked')).map(cb => cb.value);
   const history = ui.draftHistory.slice();
 
   if (id) {
@@ -430,6 +629,7 @@ function upsertTaskFromForm() {
     task.deadline = deadline;
     task.duration = duration;
     task.parents = parents.filter(p => p !== id);
+    task.categories = categories;
     task.history = history;
     task.status = status; // status transitions themselves are logged via the status-change modal
     saveState();
@@ -439,7 +639,7 @@ function upsertTaskFromForm() {
     const newId = generateId();
     const task = {
       id: newId, title, link, status, deadline, duration,
-      parents,
+      parents, categories,
       history: history.length ? history : [{ date: todayStr(), note: 'Task created' }],
       createdAt: nowISO(),
     };
@@ -835,21 +1035,15 @@ function openTaskModal(taskId) {
   ui.draftHistory = task ? task.history.slice() : [];
   renderHistoryList();
 
+  renderCategoryPicker(task ? task.categories : []);
+
   const excluded = new Set(task ? [task.id, ...getDescendants(task.id).map(t => t.id)] : []);
+  const candidates = state.tasks.filter(t => !excluded.has(t.id));
+  const selectedParentIds = task ? task.parents : [];
   const picker = document.getElementById('parentPicker');
   picker.innerHTML = '';
-  const candidates = state.tasks.filter(t => !excluded.has(t.id));
-  if (!candidates.length) {
-    picker.innerHTML = '<div class="parent-picker-empty">No other tasks available.</div>';
-  } else {
-    candidates.forEach(t => {
-      const row = document.createElement('label');
-      row.className = 'parent-picker-item';
-      const checked = task && task.parents.includes(t.id) ? 'checked' : '';
-      row.innerHTML = `<input type="checkbox" value="${t.id}" ${checked}> <span class="id-tag">${t.id}</span> ${escapeHtml(t.title)}`;
-      picker.appendChild(row);
-    });
-  }
+  const pickerTree = buildParentPickerTree(candidates, selectedParentIds);
+  picker.appendChild(pickerTree);
 
   if (task) {
     refreshModalComputedDisplays(task.id);
@@ -859,6 +1053,129 @@ function openTaskModal(taskId) {
 
   document.getElementById('taskModalOverlay').classList.add('open');
   document.getElementById('taskTitle').focus();
+}
+
+// Simple flat checkbox list of every category, indented by depth, so the
+// task can be assigned to one or more of them.
+function renderCategoryPicker(selectedIds) {
+  const picker = document.getElementById('categoryPicker');
+  picker.innerHTML = '';
+  if (!getCategories().length) {
+    picker.innerHTML = '<div class="category-picker-empty">No categories yet — create some in the Category tab.</div>';
+    return;
+  }
+  const selected = new Set(selectedIds || []);
+  function addRows(parentId, depth) {
+    getCategoryChildren(parentId).forEach(cat => {
+      const row = document.createElement('label');
+      row.className = 'category-picker-item';
+      row.style.paddingLeft = (depth * 16) + 'px';
+      const checked = selected.has(cat.id) ? 'checked' : '';
+      row.innerHTML = `<input type="checkbox" value="${cat.id}" ${checked}> ${escapeHtml(cat.name)}`;
+      picker.appendChild(row);
+      addRows(cat.id, depth + 1);
+    });
+  }
+  addRows(null, 0);
+}
+
+// Builds the parent-task picker as a collapsible tree grouped by
+// category (a task with several categories appears under each — this
+// is just a browsing aid, not the real data structure, so duplication
+// here is harmless and actually helps find things among many tasks).
+function buildParentPickerTree(candidates, selectedParentIds) {
+  const container = document.createElement('div');
+
+  function taskRow(t) {
+    const row = document.createElement('label');
+    row.className = 'parent-picker-item';
+    const checked = selectedParentIds.includes(t.id) ? 'checked' : '';
+    row.innerHTML = `<input type="checkbox" value="${t.id}" ${checked}> <span class="id-tag">${t.id}</span> ${escapeHtml(t.title)}`;
+    return row;
+  }
+
+  function categoryGroup(cat, depth) {
+    if (!categoryHasTasks(cat, candidates)) return null;
+    const node = document.createElement('div');
+    node.className = 'picker-cat-node';
+
+    const header = document.createElement('div');
+    header.className = 'picker-cat-header';
+    header.style.paddingLeft = (depth * 14) + 'px';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'picker-cat-toggle';
+    toggle.textContent = '▼';
+    const label = document.createElement('span');
+    label.className = 'picker-cat-label';
+    label.textContent = cat.name;
+    header.appendChild(toggle);
+    header.appendChild(label);
+
+    const body = document.createElement('div');
+    body.className = 'picker-cat-body';
+    toggle.onclick = () => {
+      const hidden = body.style.display === 'none';
+      body.style.display = hidden ? '' : 'none';
+      toggle.textContent = hidden ? '▼' : '▶';
+    };
+
+    getCategoryChildren(cat.id).forEach(c => {
+      const childNode = categoryGroup(c, depth + 1);
+      if (childNode) body.appendChild(childNode);
+    });
+    candidates.filter(t => (t.categories || []).includes(cat.id)).forEach(t => {
+      const row = taskRow(t);
+      row.style.paddingLeft = ((depth + 1) * 14 + 12) + 'px';
+      body.appendChild(row);
+    });
+
+    node.appendChild(header);
+    node.appendChild(body);
+    return node;
+  }
+
+  getCategoryChildren(null).forEach(cat => {
+    const node = categoryGroup(cat, 0);
+    if (node) container.appendChild(node);
+  });
+
+  const uncategorized = candidates.filter(t => !(t.categories || []).length);
+  if (uncategorized.length) {
+    const node = document.createElement('div');
+    node.className = 'picker-cat-node';
+    const header = document.createElement('div');
+    header.className = 'picker-cat-header';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'picker-cat-toggle';
+    toggle.textContent = '▼';
+    const label = document.createElement('span');
+    label.className = 'picker-cat-label';
+    label.textContent = 'Uncategorized';
+    header.appendChild(toggle);
+    header.appendChild(label);
+    const body = document.createElement('div');
+    body.className = 'picker-cat-body';
+    toggle.onclick = () => {
+      const hidden = body.style.display === 'none';
+      body.style.display = hidden ? '' : 'none';
+      toggle.textContent = hidden ? '▼' : '▶';
+    };
+    uncategorized.forEach(t => {
+      const row = taskRow(t);
+      row.style.paddingLeft = '12px';
+      body.appendChild(row);
+    });
+    node.appendChild(header);
+    node.appendChild(body);
+    container.appendChild(node);
+  }
+
+  if (!container.children.length) {
+    container.innerHTML = '<div class="parent-picker-empty">No other tasks available.</div>';
+  }
+  return container;
 }
 
 function populateStatusSelect(selectedKey) {
@@ -1550,6 +1867,7 @@ function renderAll() {
   renderTree();
   renderKanban();
   renderTimeline();
+  renderCategoryTab();
   renderSidebar();
   document.getElementById('projectNameInput').value = state.meta.projectName;
 }
@@ -1813,20 +2131,30 @@ function closeFirebaseModal() {
    ========================================================= */
 function loadExampleData() {
   const t = todayStr();
+  const catEngineering = generateCategoryId();
+  const catDesign = generateCategoryId();
+  const catTesting = generateCategoryId();
+  const catPM = generateCategoryId();
   const project = {
     id: generateProjectId(),
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
     nextIdNum: 8,
+    categories: [
+      { id: catEngineering, name: 'Engineering', parentId: null },
+      { id: catDesign, name: 'Design', parentId: catEngineering },
+      { id: catTesting, name: 'Testing', parentId: catEngineering },
+      { id: catPM, name: 'Project Management', parentId: null },
+    ],
     tasks: [
       {
         id: 'T-1', title: 'Component design', link: 'https://example.com/design-doc',
-        status: 'working', deadline: null, duration: 5, parents: [],
+        status: 'working', deadline: null, duration: 5, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -20), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-2', title: 'Component calculations', link: '',
-        status: 'released', deadline: addDays(t, -3), duration: 4, parents: ['T-1'],
+        status: 'released', deadline: addDays(t, -3), duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [
           { date: addDays(t, -18), note: 'Task created' },
           { date: addDays(t, -3), note: 'Status changed: Working → Released' },
@@ -1835,31 +2163,31 @@ function loadExampleData() {
       },
       {
         id: 'T-3', title: 'Test validation', link: '',
-        status: 'release_process', deadline: addDays(t, 4), duration: 3, parents: ['T-2'],
+        status: 'release_process', deadline: addDays(t, 4), duration: 3, parents: ['T-2'], categories: [catTesting],
         history: [{ date: addDays(t, -5), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-4', title: 'Housing design', link: '',
-        status: 'working', deadline: addDays(t, 10), duration: 6, parents: [],
+        status: 'working', deadline: addDays(t, 10), duration: 6, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -2), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-5', title: 'Final bill of materials', link: '',
-        status: 'working', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'],
+        status: 'working', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'], categories: [catPM],
         history: [{ date: addDays(t, -1), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-6', title: 'Assembly drawings', link: '',
-        status: 'working', deadline: null, duration: 4, parents: ['T-1'],
+        status: 'working', deadline: null, duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [{ date: addDays(t, -1), note: 'Task created — has no deadline of its own; scheduled forward once T-1 gets a calculated finish date from T-2.' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-7', title: 'Kickoff meeting', link: '',
-        status: 'done', deadline: addDays(t, -22), duration: 1, parents: [],
+        status: 'done', deadline: addDays(t, -22), duration: 1, parents: [], categories: [catPM],
         history: [
           { date: addDays(t, -22), note: 'Task created' },
           { date: addDays(t, -22), note: 'Status changed: Working → Done' },
@@ -2049,6 +2377,7 @@ function init() {
   initModal();
   initSidebar();
   initStatusSettings();
+  initCategoryTab();
   renderAll();
 }
 
