@@ -79,6 +79,11 @@ a{color:var(--accent);}
 .project-name-input:hover{border-color:var(--border);}
 .project-name-input:focus{border-color:var(--accent);background:var(--surface);outline:none;}
 .project-name-input:disabled{color:var(--text-tertiary);cursor:not-allowed;}
+.active-lock-badge{
+  display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;
+  color:#B45309;background:#FEF3E0;border:1px solid #F3D9A8;
+  padding:4px 10px;border-radius:100px;flex-shrink:0;white-space:nowrap;
+}
 
 .topbar-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
 .save-indicator{font-size:12px;color:var(--text-tertiary);white-space:nowrap;}
@@ -116,12 +121,7 @@ a{color:var(--accent);}
 .sidebar-project-item.active{background:var(--accent-light);}
 .sidebar-project-item.locked{background:var(--surface-alt);}
 .sidebar-project-item.locked.active{background:var(--accent-light);}
-.sidebar-lock-btn{
-  border:none;background:transparent;cursor:pointer;font-size:12px;padding:4px 5px;
-  border-radius:4px;flex-shrink:0;opacity:.55;
-}
-.sidebar-lock-btn:hover{background:var(--border);opacity:1;}
-.sidebar-project-item.locked .sidebar-lock-btn{opacity:1;}
+.sidebar-lock-indicator{font-size:10.5px;margin-right:3px;}
 .sidebar-project-info{flex:1;min-width:0;}
 .sidebar-project-name{
   font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;

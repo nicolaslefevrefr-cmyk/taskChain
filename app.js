@@ -64,7 +64,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v2.0';
+const APP_VERSION = 'v2.1';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -833,13 +833,14 @@ function renderSidebar() {
   list.innerHTML = workspace.projects.map(p => {
     const active = p.id === workspace.activeProjectId;
     const count = p.tasks.length;
+    const lockIndicator = p.locked ? '<span class="sidebar-lock-indicator" title="This project is locked">🔒</span>' : '';
     return `<div class="sidebar-project-item${active ? ' active' : ''}${p.locked ? ' locked' : ''}" data-id="${p.id}">
-      <button class="sidebar-lock-btn" data-action="lock" title="${p.locked ? 'Unlock this project' : 'Lock this project to prevent accidental changes'}">${p.locked ? '🔒' : '🔓'}</button>
       <div class="sidebar-project-info">
-        <div class="sidebar-project-name" title="${escapeAttr(p.meta.projectName)}">${escapeHtml(p.meta.projectName)}</div>
+        <div class="sidebar-project-name" title="${escapeAttr(p.meta.projectName)}">${lockIndicator}${escapeHtml(p.meta.projectName)}</div>
         <div class="sidebar-project-meta">${count} task${count === 1 ? '' : 's'}</div>
       </div>
       <div class="sidebar-project-actions">
+        <button data-action="lock" title="${p.locked ? 'Unlock this project' : 'Lock this project to prevent accidental changes'}">${p.locked ? '🔓' : '🔒'}</button>
         <button data-action="rename" title="Rename">✏</button>
         <button data-action="duplicate" title="Duplicate">⧉</button>
         <button data-action="export" title="Export this project as JSON">⬇</button>
@@ -1976,6 +1977,8 @@ function renderAll() {
   renderCategoryTab();
   renderSidebar();
   document.getElementById('projectNameInput').value = state.meta.projectName;
+  document.getElementById('projectNameInput').disabled = isActiveProjectLocked();
+  document.getElementById('activeLockBadge').hidden = !isActiveProjectLocked();
 }
 
 /* =========================================================
