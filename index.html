@@ -81,7 +81,7 @@
               <th class="col-id sortable" data-sort="id">ID <span class="sort-arrow"></span></th>
               <th class="col-title sortable" data-sort="title">Title <span class="sort-arrow"></span></th>
               <th class="col-status sortable" data-sort="status">Status <span class="sort-arrow"></span></th>
-              <th class="col-deps">Depends on (parents)</th>
+              <th class="col-category">Category</th>
               <th class="col-deadline sortable" data-sort="deadline">Deadline <span class="sort-arrow"></span></th>
               <th class="col-duration sortable" data-sort="duration">Duration <span class="sort-arrow"></span></th>
               <th class="col-link">Link</th>
@@ -160,6 +160,7 @@
     </div>
     <div class="modal-body">
       <input type="hidden" id="taskFormId">
+      <div id="taskLockBanner" class="lock-banner" hidden>🔒 This project is locked — unlock it in the sidebar to make changes.</div>
 
       <div class="form-row">
         <label for="taskTitle">Title</label>
@@ -200,7 +201,10 @@
       </div>
 
       <div class="form-row">
-        <label>History</label>
+        <div class="history-label-row">
+          <label>History</label>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnClearHistory" title="Remove every entry except the task's creation">Clear history</button>
+        </div>
         <div class="history-list" id="historyList"></div>
         <div class="history-add-row">
           <input type="date" id="historyDateInput">

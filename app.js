@@ -64,7 +64,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v1.9';
+const APP_VERSION = 'v2.0';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -85,6 +85,7 @@ let ui = {
   sortColumn: 'id',
   sortDirection: 'asc',
   collapsedCategories: new Set(),
+  collapsedKanbanColumns: new Set(),
 };
 
 function generateProjectId() {
@@ -97,6 +98,7 @@ function createEmptyProject(name) {
     tasks: [],
     categories: [],
     nextIdNum: 1,
+    locked: false,
   };
 }
 function createDefaultWorkspace() {
@@ -120,6 +122,7 @@ function normalizeProject(p) {
   p.tasks = p.tasks || [];
   p.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; t.categories = t.categories || []; });
   p.categories = p.categories || [];
+  p.locked = !!p.locked;
   if (!p.meta) p.meta = { projectName: 'Imported project', lastModified: nowISO() };
   if (!p.meta.projectName) p.meta.projectName = 'Imported project';
   if (!p.nextIdNum) {
@@ -340,6 +343,7 @@ function categoryHasTasks(cat, taskList) {
 }
 
 async function handleAddCategory(parentId) {
+  if (guardLocked('add categories')) return;
   const name = await showPrompt(parentId ? 'New subcategory name' : 'New category name', 'New category');
   if (name === null) return;
   state.categories.push({ id: generateCategoryId(), name: name.trim() || 'New category', parentId: parentId || null });
@@ -349,6 +353,7 @@ async function handleAddCategory(parentId) {
 }
 
 async function handleRenameCategory(id) {
+  if (guardLocked('rename categories')) return;
   const cat = getCategory(id);
   if (!cat) return;
   const name = await showPrompt('Rename category', cat.name);
@@ -359,6 +364,7 @@ async function handleRenameCategory(id) {
 }
 
 async function handleDeleteCategory(id) {
+  if (guardLocked('delete categories')) return;
   const cat = getCategory(id);
   if (!cat) return;
   const descendantIds = getCategoryDescendantIds(id);
@@ -384,6 +390,7 @@ async function handleDeleteCategory(id) {
 }
 
 function moveCategoryTo(categoryId, newParentId) {
+  if (isActiveProjectLocked()) { guardLocked('move categories'); return false; }
   if (categoryId === newParentId) return false;
   const cat = getCategory(categoryId);
   if (!cat) return false;
@@ -436,7 +443,7 @@ function renderCategoryNode(cat) {
 
   const card = document.createElement('div');
   card.className = 'cat-card';
-  card.draggable = true;
+  card.draggable = !isActiveProjectLocked();
   card.innerHTML = `
     <span class="cat-name">${escapeHtml(cat.name)}</span>
     <span class="cat-count">${taskCount} task${taskCount === 1 ? '' : 's'}</span>
@@ -731,6 +738,30 @@ function switchToProject(id) {
   renderAll();
 }
 
+// A locked project can still be viewed and switched to, but every
+// mutating action (task CRUD, status changes, drags, category edits,
+// rename/delete of the project itself) is blocked until it's unlocked
+// again — this is purely to prevent accidentally editing the wrong
+// project, not a real access-control feature.
+function isActiveProjectLocked() { return !!state.locked; }
+function guardLocked(actionLabel) {
+  if (isActiveProjectLocked()) {
+    toast(`"${state.meta.projectName}" is locked — unlock it in the sidebar to ${actionLabel}.`);
+    return true;
+  }
+  return false;
+}
+
+function handleToggleProjectLock(id) {
+  const p = workspace.projects.find(x => x.id === id);
+  if (!p) return;
+  p.locked = !p.locked;
+  saveState();
+  renderSidebar();
+  if (p.id === workspace.activeProjectId) renderAll();
+  toast(p.locked ? `"${p.meta.projectName}" locked.` : `"${p.meta.projectName}" unlocked.`);
+}
+
 async function handleNewProject() {
   const name = await showPrompt('Name this project', 'Untitled project');
   if (name === null) return;
@@ -747,6 +778,7 @@ function handleDuplicateProject(id) {
   clone.id = generateProjectId();
   clone.meta.projectName = `${src.meta.projectName} (copy)`;
   clone.meta.lastModified = nowISO();
+  clone.locked = false; // a duplicate starts unlocked even if the original was locked
   workspace.projects.splice(workspace.projects.indexOf(src) + 1, 0, clone);
   switchToProject(clone.id);
   toast(`Duplicated as "${clone.meta.projectName}".`);
@@ -755,6 +787,7 @@ function handleDuplicateProject(id) {
 async function handleRenameProject(id) {
   const p = workspace.projects.find(x => x.id === id);
   if (!p) return;
+  if (p.locked) { toast(`"${p.meta.projectName}" is locked — unlock it first to rename it.`); return; }
   const name = await showPrompt('Rename project', p.meta.projectName);
   if (name === null) return;
   p.meta.projectName = name.trim() || p.meta.projectName;
@@ -767,6 +800,7 @@ async function handleRenameProject(id) {
 async function handleDeleteProject(id) {
   const p = workspace.projects.find(x => x.id === id);
   if (!p) return;
+  if (p.locked) { toast(`"${p.meta.projectName}" is locked — unlock it first to delete it.`); return; }
   const choice = await showConfirm(
     `Permanently delete project "${p.meta.projectName}" (${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'})? This can't be undone unless you've exported it.`,
     [
@@ -792,13 +826,15 @@ async function handleDeleteProject(id) {
 
 function renderSidebar() {
   const list = document.getElementById('sidebarProjectList');
-  const sorted = workspace.projects.slice().sort((a, b) =>
-    (b.meta.lastModified || '').localeCompare(a.meta.lastModified || ''));
-
-  list.innerHTML = sorted.map(p => {
+  // Deliberately NOT sorted by last-modified: switching projects
+  // updates that timestamp, which would otherwise reshuffle the list
+  // right as you click something — the order stays exactly as-is
+  // (insertion order) so the list is a stable, predictable reference.
+  list.innerHTML = workspace.projects.map(p => {
     const active = p.id === workspace.activeProjectId;
     const count = p.tasks.length;
-    return `<div class="sidebar-project-item${active ? ' active' : ''}" data-id="${p.id}">
+    return `<div class="sidebar-project-item${active ? ' active' : ''}${p.locked ? ' locked' : ''}" data-id="${p.id}">
+      <button class="sidebar-lock-btn" data-action="lock" title="${p.locked ? 'Unlock this project' : 'Lock this project to prevent accidental changes'}">${p.locked ? '🔒' : '🔓'}</button>
       <div class="sidebar-project-info">
         <div class="sidebar-project-name" title="${escapeAttr(p.meta.projectName)}">${escapeHtml(p.meta.projectName)}</div>
         <div class="sidebar-project-meta">${count} task${count === 1 ? '' : 's'}</div>
@@ -819,7 +855,8 @@ function renderSidebar() {
       if (!actionBtn) { switchToProject(id); return; }
       e.stopPropagation();
       const action = actionBtn.dataset.action;
-      if (action === 'rename') handleRenameProject(id);
+      if (action === 'lock') handleToggleProjectLock(id);
+      else if (action === 'rename') handleRenameProject(id);
       else if (action === 'duplicate') handleDuplicateProject(id);
       else if (action === 'delete') handleDeleteProject(id);
       else if (action === 'export') {
@@ -832,10 +869,15 @@ function renderSidebar() {
 
 function initSidebar() {
   const sidebarEl = document.getElementById('sidebar');
-  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true') sidebarEl.classList.add('collapsed');
+  const appEl = document.getElementById('app');
+  const collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  sidebarEl.classList.toggle('collapsed', collapsed);
+  appEl.classList.toggle('sidebar-collapsed', collapsed);
   document.getElementById('btnSidebarToggle').onclick = () => {
     sidebarEl.classList.toggle('collapsed');
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarEl.classList.contains('collapsed'));
+    const nowCollapsed = sidebarEl.classList.contains('collapsed');
+    appEl.classList.toggle('sidebar-collapsed', nowCollapsed);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, nowCollapsed);
   };
   document.getElementById('btnNewProject').onclick = handleNewProject;
   renderSidebar();
@@ -990,6 +1032,7 @@ function showStatusChangeModal(task, newStatus) {
 
 async function promptAndApplyStatusChange(task, newStatus) {
   if (task.status === newStatus) return false;
+  if (guardLocked('change task status')) return false;
   const result = await showStatusChangeModal(task, newStatus);
   if (!result) return false;
 
@@ -1050,6 +1093,8 @@ function openTaskModal(taskId) {
   } else {
     document.getElementById('taskDeadlineNote').textContent = '';
   }
+
+  applyTaskModalLockState();
 
   document.getElementById('taskModalOverlay').classList.add('open');
   document.getElementById('taskTitle').focus();
@@ -1184,6 +1229,25 @@ function populateStatusSelect(selectedKey) {
   sel.value = selectedKey;
 }
 
+// Disables every field/button that could mutate the task when the
+// active project is locked, and shows the explanatory banner. Called
+// once when the modal opens — nothing inside it can trigger further
+// edits while locked (status changes, add-history, etc. are already
+// blocked at the source), so it doesn't need to re-run mid-session.
+function applyTaskModalLockState() {
+  const locked = isActiveProjectLocked();
+  document.getElementById('taskLockBanner').hidden = !locked;
+  ['taskTitle', 'taskStatus', 'taskLink', 'taskDeadline', 'taskDuration', 'historyDateInput', 'historyNoteInput']
+    .forEach(id => { document.getElementById(id).disabled = locked; });
+  document.getElementById('btnAddHistory').disabled = locked;
+  document.getElementById('btnClearHistory').disabled = locked;
+  document.getElementById('btnSaveTask').disabled = locked;
+  document.getElementById('btnDeleteTask').disabled = locked;
+  document.querySelectorAll('#parentPicker input[type=checkbox], #categoryPicker input[type=checkbox]')
+    .forEach(cb => { cb.disabled = locked; });
+  document.querySelectorAll('.history-item .h-del').forEach(btn => { btn.disabled = locked; });
+}
+
 function refreshModalComputedDisplays(taskId) {
   const task = getTask(taskId);
   const schedule = computeSchedule();
@@ -1236,6 +1300,7 @@ function renderHistoryList() {
 }
 
 async function handleSaveTask() {
+  if (guardLocked('save tasks')) return;
   const savedId = upsertTaskFromForm();
   if (savedId) {
     closeTaskModal();
@@ -1244,6 +1309,7 @@ async function handleSaveTask() {
 }
 
 async function handleDeleteTask() {
+  if (guardLocked('delete tasks')) return;
   const id = document.getElementById('taskFormId').value;
   const task = getTask(id);
   const children = getChildren(id);
@@ -1324,11 +1390,10 @@ function renderList() {
   document.getElementById('taskTableBody').closest('table').style.display = state.tasks.length ? '' : 'none';
 
   tbody.innerHTML = list.map(t => {
-    const parentsHtml = t.parents.length
-      ? t.parents.map(pid => {
-          const p = getTask(pid);
-          const label = p ? `${pid}: ${p.title}` : pid;
-          return `<span class="dep-tag" title="${escapeAttr(label)}">${escapeHtml(label)}</span>`;
+    const categoriesHtml = (t.categories || []).length
+      ? t.categories.map(cid => {
+          const cat = getCategory(cid);
+          return cat ? `<span class="dep-tag" title="${escapeAttr(cat.name)}">${escapeHtml(cat.name)}</span>` : '';
         }).join('')
       : '<span class="label-hint">—</span>';
 
@@ -1353,7 +1418,7 @@ function renderList() {
       <td class="id-tag">${t.id}</td>
       <td class="task-title-cell" data-open="${t.id}">${escapeHtml(t.title)}</td>
       <td>${statusBadge(t.status)}</td>
-      <td>${parentsHtml}</td>
+      <td>${categoriesHtml}</td>
       <td>${deadlineHtml}</td>
       <td>${t.duration != null ? t.duration + ' d' : '<span class="label-hint">—</span>'}</td>
       <td>${linkHtml}</td>
@@ -1602,6 +1667,7 @@ function renderTree() {
 
     el.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
+      if (isActiveProjectLocked()) return;
       e.preventDefault();
       treeDrag = {
         id,
@@ -1661,12 +1727,22 @@ function initTreeDragHandlers() {
 function renderKanban() {
   const board = document.getElementById('kanbanBoard');
   const statuses = getStatuses();
-  board.style.gridTemplateColumns = `repeat(${statuses.length}, minmax(200px, 1fr))`;
+
   board.innerHTML = statuses.map(s => {
     const tasks = state.tasks.filter(t => t.status === s.key)
       .sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
+    const collapsed = ui.collapsedKanbanColumns.has(s.key);
+
+    if (collapsed) {
+      return `<div class="kanban-col-collapsed" data-status="${s.key}" title="${escapeAttr(s.label)} (${tasks.length}) — click to expand">
+        <button class="kanban-col-expand-btn" data-status="${s.key}" title="Expand column">▸</button>
+        <span class="kanban-col-collapsed-label" style="color:${readableStatusColor(s.color)};">${escapeHtml(s.label)}</span>
+        <span class="kanban-col-count">${tasks.length}</span>
+      </div>`;
+    }
     return `<div class="kanban-col" data-status="${s.key}">
       <div class="kanban-col-header" style="color:${readableStatusColor(s.color)};">
+        <button class="kanban-col-collapse-btn" data-status="${s.key}" title="Collapse column">◂</button>
         <span>${escapeHtml(s.label)}</span>
         <span class="kanban-col-count">${tasks.length}</span>
       </div>
@@ -1675,6 +1751,23 @@ function renderKanban() {
       </div>
     </div>`;
   }).join('');
+
+  board.querySelectorAll('.kanban-col-collapse-btn, .kanban-col-expand-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const key = btn.dataset.status;
+      if (ui.collapsedKanbanColumns.has(key)) ui.collapsedKanbanColumns.delete(key);
+      else ui.collapsedKanbanColumns.add(key);
+      renderKanban();
+    });
+  });
+  // Clicking anywhere else on a collapsed column also expands it.
+  board.querySelectorAll('.kanban-col-collapsed').forEach(col => {
+    col.addEventListener('click', () => {
+      ui.collapsedKanbanColumns.delete(col.dataset.status);
+      renderKanban();
+    });
+  });
 
   board.querySelectorAll('.kanban-card').forEach(card => {
     card.addEventListener('dragstart', e => {
@@ -1698,12 +1791,25 @@ function renderKanban() {
       await handleStatusDrop(taskId, newStatus);
     });
   });
+
+  // A collapsed column stays a valid drop target — no need to expand
+  // it first just to move a card into that status.
+  board.querySelectorAll('.kanban-col-collapsed').forEach(col => {
+    col.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', async e => {
+      e.preventDefault(); e.stopPropagation();
+      col.classList.remove('drag-over');
+      const taskId = e.dataTransfer.getData('text/plain') || ui.dragTaskId;
+      await handleStatusDrop(taskId, col.dataset.status);
+    });
+  });
 }
 
 function kanbanCardHtml(t) {
   const meta = getStatusMeta(t.status);
   const childCount = getDescendants(t.id).length;
-  return `<div class="kanban-card" style="border-left-color:${readableStatusColor(meta.color)};" draggable="true" data-id="${t.id}">
+  return `<div class="kanban-card" style="border-left-color:${readableStatusColor(meta.color)};" draggable="${!isActiveProjectLocked()}" data-id="${t.id}">
     <div class="kanban-card-title">${escapeHtml(t.title)}</div>
     <div class="kanban-card-meta">
       <span class="kanban-card-id">${t.id}</span>
@@ -2139,6 +2245,7 @@ function loadExampleData() {
     id: generateProjectId(),
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
     nextIdNum: 8,
+    locked: false,
     categories: [
       { id: catEngineering, name: 'Engineering', parentId: null },
       { id: catDesign, name: 'Design', parentId: catEngineering },
@@ -2225,8 +2332,8 @@ function initTabs() {
 }
 
 function initToolbar() {
-  document.getElementById('btnNewTask').onclick = () => openTaskModal(null);
-  document.getElementById('btnEmptyNewTask').onclick = () => openTaskModal(null);
+  document.getElementById('btnNewTask').onclick = () => { if (guardLocked('add tasks')) return; openTaskModal(null); };
+  document.getElementById('btnEmptyNewTask').onclick = () => { if (guardLocked('add tasks')) return; openTaskModal(null); };
 
   document.getElementById('btnExport').onclick = exportWorkspaceJSON;
   document.getElementById('btnImport').onclick = () => document.getElementById('fileImport').click();
@@ -2236,6 +2343,7 @@ function initToolbar() {
   };
   document.getElementById('btnLoadExample').onclick = () => loadExampleData();
   document.getElementById('btnReset').onclick = async () => {
+    if (guardLocked('clear tasks')) return;
     const choice = await showConfirm(
       `Remove all tasks from "${state.meta.projectName}"? The project itself is kept — this only clears its tasks. Any unexported changes will be lost.`,
       [
@@ -2251,6 +2359,7 @@ function initToolbar() {
   };
 
   document.getElementById('projectNameInput').oninput = e => {
+    if (isActiveProjectLocked()) { e.target.value = state.meta.projectName; return; }
     state.meta.projectName = e.target.value;
     saveState();
     renderSidebar();
@@ -2349,6 +2458,21 @@ function initModal() {
     ui.draftHistory.push({ date, note });
     document.getElementById('historyNoteInput').value = '';
     renderHistoryList();
+  };
+
+  document.getElementById('btnClearHistory').onclick = async () => {
+    if (guardLocked('clear history')) return;
+    if (ui.draftHistory.length <= 1) { toast('Nothing to clear.'); return; }
+    const choice = await showConfirm('Clear this task\'s history, keeping only its creation entry?', [
+      { label: 'Cancel', value: 'no' },
+      { label: 'Clear history', value: 'yes', danger: true, primary: true },
+    ]);
+    if (choice !== 'yes') return;
+    const sorted = ui.draftHistory.slice().sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+    const creationEntry = sorted.find(h => h.note === 'Task created') || sorted[0];
+    ui.draftHistory = [creationEntry];
+    renderHistoryList();
+    toast('History cleared — save the task to keep this change.');
   };
 
   document.getElementById('historyNoteInput').addEventListener('keydown', e => {
