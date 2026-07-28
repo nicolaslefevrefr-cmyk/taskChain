@@ -239,6 +239,7 @@ a{color:var(--accent);}
 .task-table tbody tr:hover{background:var(--surface-alt);}
 .col-id{width:70px;}
 .col-status{width:160px;}
+.col-priority{width:90px;}
 .col-deadline{width:130px;}
 .col-duration{width:70px;}
 .col-link{width:60px;}
@@ -451,6 +452,7 @@ a{color:var(--accent);}
 .modal-confirm #promptInput:focus{outline:none;border-color:var(--accent);}
 .modal-firebase{max-width:600px;}
 .modal-status-settings{max-width:480px;}
+.modal-status-settings{max-width:480px;}
 .status-setting-row{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--border);}
 .status-setting-row:last-child{border-bottom:none;}
 .status-color-input{
@@ -469,6 +471,65 @@ a{color:var(--accent);}
 }
 .status-setting-actions button:hover:not(:disabled){background:var(--surface-alt);color:var(--text);}
 .status-setting-actions button:disabled{opacity:.3;cursor:default;}
+.modal-task{max-width:860px;}
+.task-modal-header{padding:10px 16px;}
+.task-modal-id{font-family:var(--font-mono);font-size:12px;color:var(--text-tertiary);}
+.task-modal-body{padding:0;overflow-y:auto;flex:1;}
+.task-modal-body .lock-banner{margin:18px 24px 0;}
+.task-modal-columns{display:flex;align-items:stretch;min-height:420px;}
+.task-modal-sidebar{
+  width:230px;flex-shrink:0;padding:20px;background:var(--surface-alt);
+  border-right:1px solid var(--border);overflow-y:auto;
+}
+.task-modal-sidebar .form-row{margin-bottom:18px;}
+.task-modal-main{flex:1;min-width:0;padding:20px 24px 24px;overflow-y:auto;}
+
+.task-title-input{
+  width:100%;border:none;background:transparent;outline:none;
+  font-size:23px;font-weight:700;color:var(--text);letter-spacing:-.01em;
+  padding:4px 0;margin-bottom:10px;
+}
+.task-title-input::placeholder{color:var(--text-tertiary);font-weight:700;}
+.task-description-input{
+  width:100%;border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:inherit;font-size:13.5px;color:var(--text);
+  resize:vertical;min-height:76px;margin-bottom:20px;background:var(--surface);
+}
+.task-description-input:focus{outline:none;border-color:var(--accent);}
+.task-description-input::placeholder{color:var(--text-tertiary);}
+
+.priority-toggle{display:flex;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;}
+.priority-toggle button{
+  flex:1;border:none;background:var(--surface);padding:7px 0;cursor:pointer;
+  font-size:12px;font-weight:600;color:var(--text-secondary);border-right:1px solid var(--border);
+}
+.priority-toggle button:last-child{border-right:none;}
+.priority-toggle button:hover:not(:disabled){background:var(--border);}
+.priority-toggle button:disabled{cursor:not-allowed;opacity:.6;}
+.priority-toggle button.active[data-priority="low"]{background:#6B7280;color:#fff;}
+.priority-toggle button.active[data-priority="medium"]{background:#2563EB;color:#fff;}
+.priority-toggle button.active[data-priority="high"]{background:#DC2626;color:#fff;}
+
+.chip-list-row{display:flex;align-items:flex-start;gap:8px;}
+.chip-list{flex:1;display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-height:26px;}
+.chip-list.clickable .dep-tag{cursor:pointer;}
+.chip-list.clickable .dep-tag:hover{background:var(--accent-light);border-color:var(--accent);color:var(--accent-dark);}
+
+.cat-select-card{
+  display:flex;align-items:center;gap:8px;flex:1;min-width:0;padding:6px 10px;
+  border-radius:var(--radius-sm);background:var(--surface-alt);cursor:pointer;
+}
+.cat-select-card:hover{background:var(--border);}
+.cat-select-card input{width:auto;flex-shrink:0;}
+
+.priority-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;}
+.priority-badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;}
+
+@media (max-width:760px){
+  .task-modal-columns{flex-direction:column;}
+  .task-modal-sidebar{width:100%;border-right:none;border-bottom:1px solid var(--border);}
+}
+
 .modal-header{
   display:flex;align-items:center;justify-content:space-between;
   padding:18px 22px;border-bottom:1px solid var(--border);

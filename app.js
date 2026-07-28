@@ -59,12 +59,24 @@ function contrastTextFor(hex) {
   return relativeLuminance(hex) > 0.6 ? '#1A1D23' : '#FFFFFF';
 }
 
+/* ---------- Priority ----------
+   A fixed 3-level scale (unlike statuses, not user-configurable). */
+const PRIORITY_META = {
+  low: { label: 'Low', color: '#6B7280' },
+  medium: { label: 'Medium', color: '#2563EB' },
+  high: { label: 'High', color: '#DC2626' },
+};
+function priorityBadge(priority) {
+  const meta = PRIORITY_META[priority] || PRIORITY_META.medium;
+  return `<span class="priority-badge" style="color:${meta.color};">${meta.label}</span>`;
+}
+
 const ZOOM_LEVELS = [6, 9, 13, 18, 26, 36, 48, 64]; // px per day, timeline
 const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagram scale
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v2.2';
+const APP_VERSION = 'v2.3';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -79,6 +91,8 @@ let ui = {
   statusFilter: 'all',
   editingTaskId: null,
   draftHistory: [],
+  draftCategories: [],
+  draftParents: [],
   dragTaskId: null,
   zoomIndex: 4,
   treeZoomIndex: 3,
@@ -120,7 +134,13 @@ function todayStr() {
    ========================================================= */
 function normalizeProject(p) {
   p.tasks = p.tasks || [];
-  p.tasks.forEach(t => { t.parents = t.parents || []; t.history = t.history || []; t.categories = t.categories || []; });
+  p.tasks.forEach(t => {
+    t.parents = t.parents || [];
+    t.history = t.history || [];
+    t.categories = t.categories || [];
+    t.description = t.description || '';
+    if (!['low', 'medium', 'high'].includes(t.priority)) t.priority = 'medium';
+  });
   p.categories = p.categories || [];
   p.locked = !!p.locked;
   if (!p.meta) p.meta = { projectName: 'Imported project', lastModified: nowISO() };
@@ -620,23 +640,28 @@ function upsertTaskFromForm() {
   const title = document.getElementById('taskTitle').value.trim();
   if (!title) { toast('A title is required.'); return null; }
 
+  const description = document.getElementById('taskDescription').value.trim();
   const status = document.getElementById('taskStatus').value;
+  const priorityBtn = document.querySelector('#priorityToggle button.active');
+  const priority = priorityBtn ? priorityBtn.dataset.priority : 'medium';
   const link = document.getElementById('taskLink').value.trim();
   const deadline = document.getElementById('taskDeadline').value || null;
   const durationRaw = document.getElementById('taskDuration').value;
   const duration = durationRaw === '' ? null : Math.max(0, parseInt(durationRaw, 10));
-  const parents = Array.from(document.querySelectorAll('#parentPicker input[type=checkbox]:checked')).map(cb => cb.value);
-  const categories = Array.from(document.querySelectorAll('#categoryPicker input[type=checkbox]:checked')).map(cb => cb.value);
+  const parents = ui.draftParents.slice();
+  const categories = ui.draftCategories.slice();
   const history = ui.draftHistory.slice();
 
   if (id) {
     const task = getTask(id);
     task.title = title;
+    task.description = description;
     task.link = link;
     task.deadline = deadline;
     task.duration = duration;
     task.parents = parents.filter(p => p !== id);
     task.categories = categories;
+    task.priority = priority;
     task.history = history;
     task.status = status; // status transitions themselves are logged via the status-change modal
     saveState();
@@ -645,7 +670,7 @@ function upsertTaskFromForm() {
   } else {
     const newId = generateId();
     const task = {
-      id: newId, title, link, status, deadline, duration,
+      id: newId, title, description, link, status, priority, deadline, duration,
       parents, categories,
       history: history.length ? history : [{ date: todayStr(), note: 'Task created' }],
       createdAt: nowISO(),
@@ -1065,10 +1090,12 @@ function openTaskModal(taskId) {
   ui.editingTaskId = taskId;
   const task = taskId ? getTask(taskId) : null;
 
-  document.getElementById('taskModalTitle').textContent = task ? `Edit ${task.id}` : 'New task';
+  document.getElementById('taskModalIdBadge').textContent = task ? task.id : 'New task';
   document.getElementById('taskFormId').value = task ? task.id : '';
   document.getElementById('taskTitle').value = task ? task.title : '';
+  document.getElementById('taskDescription').value = task ? (task.description || '') : '';
   populateStatusSelect(task ? task.status : getStatuses()[0].key);
+  setPriorityToggle(task ? (task.priority || 'medium') : 'medium');
   document.getElementById('taskLink').value = task ? (task.link || '') : '';
   document.getElementById('taskDeadline').value = task ? (task.deadline || '') : '';
   document.getElementById('taskDuration').value = task && task.duration != null ? task.duration : '';
@@ -1079,15 +1106,11 @@ function openTaskModal(taskId) {
   ui.draftHistory = task ? task.history.slice() : [];
   renderHistoryList();
 
-  renderCategoryPicker(task ? task.categories : []);
+  ui.draftCategories = task ? task.categories.slice() : [];
+  renderCategoryChipList();
 
-  const excluded = new Set(task ? [task.id, ...getDescendants(task.id).map(t => t.id)] : []);
-  const candidates = state.tasks.filter(t => !excluded.has(t.id));
-  const selectedParentIds = task ? task.parents : [];
-  const picker = document.getElementById('parentPicker');
-  picker.innerHTML = '';
-  const pickerTree = buildParentPickerTree(candidates, selectedParentIds);
-  picker.appendChild(pickerTree);
+  ui.draftParents = task ? task.parents.slice() : [];
+  renderParentChipList();
 
   if (task) {
     refreshModalComputedDisplays(task.id);
@@ -1101,42 +1124,120 @@ function openTaskModal(taskId) {
   document.getElementById('taskTitle').focus();
 }
 
-// Simple flat checkbox list of every category, indented by depth, so the
-// task can be assigned to one or more of them.
-function renderCategoryPicker(selectedIds) {
-  const picker = document.getElementById('categoryPicker');
-  picker.innerHTML = '';
-  if (!getCategories().length) {
-    picker.innerHTML = '<div class="category-picker-empty">No categories yet — create some in the Category tab.</div>';
-    return;
-  }
-  const selected = new Set(selectedIds || []);
-  function addRows(parentId, depth) {
-    getCategoryChildren(parentId).forEach(cat => {
-      const row = document.createElement('label');
-      row.className = 'category-picker-item';
-      row.style.paddingLeft = (depth * 16) + 'px';
-      const checked = selected.has(cat.id) ? 'checked' : '';
-      row.innerHTML = `<input type="checkbox" value="${cat.id}" ${checked}> ${escapeHtml(cat.name)}`;
-      picker.appendChild(row);
-      addRows(cat.id, depth + 1);
-    });
-  }
-  addRows(null, 0);
+function setPriorityToggle(value) {
+  document.querySelectorAll('#priorityToggle button').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.priority === value);
+  });
 }
 
-// Builds the parent-task picker as a collapsible tree grouped by
-// category (a task with several categories appears under each — this
-// is just a browsing aid, not the real data structure, so duplication
-// here is harmless and actually helps find things among many tasks).
-function buildParentPickerTree(candidates, selectedParentIds) {
+// Inline, read-only-looking chip lists shown in the task modal itself;
+// the actual selection happens in the two sub-picker modals below.
+function renderCategoryChipList() {
+  const wrap = document.getElementById('categoryChipList');
+  if (!ui.draftCategories.length) {
+    wrap.innerHTML = '<span class="label-hint">No categories</span>';
+    return;
+  }
+  wrap.innerHTML = ui.draftCategories.map(cid => {
+    const c = getCategory(cid);
+    return c ? `<span class="dep-tag" title="${escapeAttr(c.name)}">${escapeHtml(c.name)}</span>` : '';
+  }).join('');
+}
+
+function renderParentChipList() {
+  const wrap = document.getElementById('parentChipList');
+  if (!ui.draftParents.length) {
+    wrap.innerHTML = '<span class="label-hint">No parent tasks</span>';
+    return;
+  }
+  wrap.innerHTML = ui.draftParents.map(pid => {
+    const p = getTask(pid);
+    const label = p ? `${pid}: ${p.title}` : pid;
+    return `<span class="dep-tag" data-open="${pid}" title="${escapeAttr(label)} — click to open">${escapeHtml(label)}</span>`;
+  }).join('');
+  wrap.querySelectorAll('[data-open]').forEach(el => {
+    el.onclick = () => openTaskModal(el.dataset.open);
+  });
+}
+
+// ---- Category select sub-modal: a full collapsible tree with checkboxes ----
+function renderCategorySelectTree() {
+  const wrap = document.getElementById('categorySelectTree');
+  if (!getCategories().length) {
+    wrap.innerHTML = '<div class="parent-picker-empty">No categories yet — create some in the Category tab.</div>';
+    return;
+  }
+  function renderNode(cat) {
+    const children = getCategoryChildren(cat.id);
+    const collapsed = ui.collapsedCategories.has(cat.id);
+    const checked = ui.draftCategories.includes(cat.id) ? 'checked' : '';
+    let html = `<div class="cat-node">
+      <div class="cat-row">
+        <button type="button" class="cat-toggle${children.length ? '' : ' leaf'}" data-toggle="${cat.id}">${collapsed ? '▶' : '▼'}</button>
+        <label class="cat-select-card">
+          <input type="checkbox" value="${cat.id}" ${checked}>
+          <span class="cat-name">${escapeHtml(cat.name)}</span>
+        </label>
+      </div>`;
+    if (children.length && !collapsed) {
+      html += `<div class="cat-children">${children.map(renderNode).join('')}</div>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+  wrap.innerHTML = `<div class="cat-root-list">${getCategoryChildren(null).map(renderNode).join('')}</div>`;
+
+  wrap.querySelectorAll('[data-toggle]').forEach(btn => {
+    btn.onclick = () => {
+      const id = btn.dataset.toggle;
+      if (ui.collapsedCategories.has(id)) ui.collapsedCategories.delete(id); else ui.collapsedCategories.add(id);
+      renderCategorySelectTree();
+    };
+  });
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.onchange = () => {
+      if (cb.checked) { if (!ui.draftCategories.includes(cb.value)) ui.draftCategories.push(cb.value); }
+      else { ui.draftCategories = ui.draftCategories.filter(id => id !== cb.value); }
+    };
+  });
+}
+
+function openCategorySelectModal() {
+  if (guardLocked('edit categories')) return;
+  renderCategorySelectTree();
+  document.getElementById('categorySelectOverlay').classList.add('open');
+}
+
+// ---- Parent task select sub-modal: reuses the category-grouped tree,
+// now driven by ui.draftParents directly so checkbox changes apply live. ----
+function openParentSelectModal() {
+  if (guardLocked('edit parent tasks')) return;
+  const task = ui.editingTaskId ? getTask(ui.editingTaskId) : null;
+  const excluded = new Set(task ? [task.id, ...getDescendants(task.id).map(t => t.id)] : []);
+  const candidates = state.tasks.filter(t => !excluded.has(t.id));
+  const wrap = document.getElementById('parentSelectTree');
+  wrap.innerHTML = '';
+  wrap.appendChild(buildParentPickerTree(candidates));
+  document.getElementById('parentSelectOverlay').classList.add('open');
+}
+
+// Builds a collapsible tree of tasks grouped by category (a task with
+// several categories appears under each — this is just a browsing aid,
+// not the real data structure, so duplication here is harmless and
+// actually helps find things among many tasks). Checkbox state reads
+// from and writes straight to ui.draftParents.
+function buildParentPickerTree(candidates) {
   const container = document.createElement('div');
 
   function taskRow(t) {
     const row = document.createElement('label');
     row.className = 'parent-picker-item';
-    const checked = selectedParentIds.includes(t.id) ? 'checked' : '';
+    const checked = ui.draftParents.includes(t.id) ? 'checked' : '';
     row.innerHTML = `<input type="checkbox" value="${t.id}" ${checked}> <span class="id-tag">${t.id}</span> ${escapeHtml(t.title)}`;
+    row.querySelector('input').onchange = (e) => {
+      if (e.target.checked) { if (!ui.draftParents.includes(t.id)) ui.draftParents.push(t.id); }
+      else { ui.draftParents = ui.draftParents.filter(id => id !== t.id); }
+    };
     return row;
   }
 
@@ -1238,14 +1339,15 @@ function populateStatusSelect(selectedKey) {
 function applyTaskModalLockState() {
   const locked = isActiveProjectLocked();
   document.getElementById('taskLockBanner').hidden = !locked;
-  ['taskTitle', 'taskStatus', 'taskLink', 'taskDeadline', 'taskDuration', 'historyDateInput', 'historyNoteInput']
+  ['taskTitle', 'taskDescription', 'taskStatus', 'taskLink', 'taskDeadline', 'taskDuration', 'historyDateInput', 'historyNoteInput']
     .forEach(id => { document.getElementById(id).disabled = locked; });
+  document.querySelectorAll('#priorityToggle button').forEach(btn => { btn.disabled = locked; });
+  document.getElementById('btnEditCategories').disabled = locked;
+  document.getElementById('btnEditParents').disabled = locked;
   document.getElementById('btnAddHistory').disabled = locked;
   document.getElementById('btnClearHistory').disabled = locked;
   document.getElementById('btnSaveTask').disabled = locked;
   document.getElementById('btnDeleteTask').disabled = locked;
-  document.querySelectorAll('#parentPicker input[type=checkbox], #categoryPicker input[type=checkbox]')
-    .forEach(cb => { cb.disabled = locked; });
   document.querySelectorAll('.history-item .h-del').forEach(btn => { btn.disabled = locked; });
 }
 
@@ -1359,6 +1461,7 @@ function getFilteredTasks() {
 
   const schedule = computeSchedule();
   const statusOrder = getStatuses().map(s => s.key);
+  const priorityOrder = { low: 0, medium: 1, high: 2 };
   const dir = ui.sortDirection === 'desc' ? -1 : 1;
   const effectiveDeadline = (t) => t.deadline || (schedule[t.id] && schedule[t.id].finish) || null;
 
@@ -1368,6 +1471,8 @@ function getFilteredTasks() {
         return a.title.localeCompare(b.title) * dir;
       case 'status':
         return (statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status)) * dir;
+      case 'priority':
+        return ((priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1)) * dir;
       case 'deadline':
         return compareNullsLast(effectiveDeadline(a), effectiveDeadline(b), (x, y) => x.localeCompare(y) * dir);
       case 'duration':
@@ -1419,6 +1524,7 @@ function renderList() {
       <td class="id-tag">${t.id}</td>
       <td class="task-title-cell" data-open="${t.id}">${escapeHtml(t.title)}</td>
       <td>${statusBadge(t.status)}</td>
+      <td>${priorityBadge(t.priority)}</td>
       <td>${categoriesHtml}</td>
       <td>${deadlineHtml}</td>
       <td>${t.duration != null ? t.duration + ' d' : '<span class="label-hint">—</span>'}</td>
@@ -2258,13 +2364,15 @@ function loadExampleData() {
     tasks: [
       {
         id: 'T-1', title: 'Component design', link: 'https://example.com/design-doc',
-        status: 'working', deadline: null, duration: 5, parents: [], categories: [catDesign],
+        description: 'Define the overall geometry and material for the bracket, including tolerances for the mounting interface.',
+        status: 'working', priority: 'high', deadline: null, duration: 5, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -20), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-2', title: 'Component calculations', link: '',
-        status: 'released', deadline: addDays(t, -3), duration: 4, parents: ['T-1'], categories: [catDesign],
+        description: 'Structural load calculations for the design above, to validate margins before manufacturing.',
+        status: 'released', priority: 'high', deadline: addDays(t, -3), duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [
           { date: addDays(t, -18), note: 'Task created' },
           { date: addDays(t, -3), note: 'Status changed: Working → Released' },
@@ -2273,31 +2381,31 @@ function loadExampleData() {
       },
       {
         id: 'T-3', title: 'Test validation', link: '',
-        status: 'release_process', deadline: addDays(t, 4), duration: 3, parents: ['T-2'], categories: [catTesting],
+        status: 'release_process', priority: 'medium', deadline: addDays(t, 4), duration: 3, parents: ['T-2'], categories: [catTesting],
         history: [{ date: addDays(t, -5), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-4', title: 'Housing design', link: '',
-        status: 'working', deadline: addDays(t, 10), duration: 6, parents: [], categories: [catDesign],
+        status: 'working', priority: 'medium', deadline: addDays(t, 10), duration: 6, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -2), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-5', title: 'Final bill of materials', link: '',
-        status: 'working', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'], categories: [catPM],
+        status: 'working', priority: 'low', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'], categories: [catPM],
         history: [{ date: addDays(t, -1), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-6', title: 'Assembly drawings', link: '',
-        status: 'working', deadline: null, duration: 4, parents: ['T-1'], categories: [catDesign],
+        status: 'working', priority: 'medium', deadline: null, duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [{ date: addDays(t, -1), note: 'Task created — has no deadline of its own; scheduled forward once T-1 gets a calculated finish date from T-2.' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-7', title: 'Kickoff meeting', link: '',
-        status: 'done', deadline: addDays(t, -22), duration: 1, parents: [], categories: [catPM],
+        status: 'done', priority: 'low', deadline: addDays(t, -22), duration: 1, parents: [], categories: [catPM],
         history: [
           { date: addDays(t, -22), note: 'Task created' },
           { date: addDays(t, -22), note: 'Status changed: Working → Done' },
@@ -2434,6 +2542,39 @@ function initModal() {
     if (e.target.id === 'taskModalOverlay') closeTaskModal();
   });
 
+  document.querySelectorAll('#priorityToggle button').forEach(btn => {
+    btn.onclick = () => {
+      if (isActiveProjectLocked()) return;
+      setPriorityToggle(btn.dataset.priority);
+    };
+  });
+
+  document.getElementById('btnEditCategories').onclick = openCategorySelectModal;
+  document.getElementById('categorySelectClose').onclick = () => document.getElementById('categorySelectOverlay').classList.remove('open');
+  document.getElementById('categorySelectDone').onclick = () => {
+    document.getElementById('categorySelectOverlay').classList.remove('open');
+    renderCategoryChipList();
+  };
+  document.getElementById('categorySelectOverlay').addEventListener('click', e => {
+    if (e.target.id === 'categorySelectOverlay') {
+      document.getElementById('categorySelectOverlay').classList.remove('open');
+      renderCategoryChipList();
+    }
+  });
+
+  document.getElementById('btnEditParents').onclick = openParentSelectModal;
+  document.getElementById('parentSelectClose').onclick = () => document.getElementById('parentSelectOverlay').classList.remove('open');
+  document.getElementById('parentSelectDone').onclick = () => {
+    document.getElementById('parentSelectOverlay').classList.remove('open');
+    renderParentChipList();
+  };
+  document.getElementById('parentSelectOverlay').addEventListener('click', e => {
+    if (e.target.id === 'parentSelectOverlay') {
+      document.getElementById('parentSelectOverlay').classList.remove('open');
+      renderParentChipList();
+    }
+  });
+
   // Status changes go through the dedicated status-change modal so a
   // reason can be logged and cascading to children can be decided.
   document.getElementById('taskStatus').addEventListener('change', async (e) => {
@@ -2489,6 +2630,8 @@ function initModal() {
       document.getElementById('statusChangeOverlay').classList.remove('open');
       document.getElementById('promptOverlay').classList.remove('open');
       document.getElementById('statusSettingsOverlay').classList.remove('open');
+      document.getElementById('categorySelectOverlay').classList.remove('open');
+      document.getElementById('parentSelectOverlay').classList.remove('open');
       closeFirebaseModal();
     }
   });
