@@ -220,6 +220,13 @@ a{color:var(--accent);}
 }
 .search-box input:focus{outline:none;border-color:var(--accent);}
 
+.category-filter-select{
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:8px 10px;background:var(--surface);color:var(--text-secondary);
+  font-size:13px;max-width:200px;
+}
+.category-filter-select:focus{outline:none;border-color:var(--accent);}
+
 /* =========================================================
    TABLE (List view)
    ========================================================= */

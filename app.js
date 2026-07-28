@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v2.4';
+const APP_VERSION = 'v2.5';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -89,6 +89,7 @@ let ui = {
   activeTab: 'list',
   search: '',
   statusFilter: 'all',
+  categoryFilter: 'all',
   editingTaskId: null,
   draftHistory: [],
   draftCategories: [],
@@ -1454,6 +1455,13 @@ function compareNullsLast(a, b, cmpFn) {
 function getFilteredTasks() {
   let list = state.tasks.slice();
   if (ui.statusFilter !== 'all') list = list.filter(t => t.status === ui.statusFilter);
+  if (ui.categoryFilter === 'uncategorized') {
+    list = list.filter(t => !(t.categories || []).length);
+  } else if (ui.categoryFilter !== 'all') {
+    // Filtering by a category also includes tasks tagged with any of its subcategories.
+    const allowed = new Set([ui.categoryFilter, ...getCategoryDescendantIds(ui.categoryFilter)]);
+    list = list.filter(t => (t.categories || []).some(cid => allowed.has(cid)));
+  }
   if (ui.search.trim()) {
     const q = ui.search.trim().toLowerCase();
     list = list.filter(t => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q));
@@ -1488,6 +1496,7 @@ function getFilteredTasks() {
 }
 
 function renderList() {
+  renderCategoryFilterSelect();
   const tbody = document.getElementById('taskTableBody');
   const list = getFilteredTasks();
   const schedule = computeSchedule();
@@ -1589,6 +1598,25 @@ function renderStatusFilterChips() {
       renderList();
     };
   });
+}
+
+function renderCategoryFilterSelect() {
+  const sel = document.getElementById('categoryFilterSelect');
+  const prevValue = ui.categoryFilter;
+  let html = `<option value="all">All categories</option>`;
+  function addOptions(parentId, depth) {
+    getCategoryChildren(parentId).forEach(cat => {
+      const prefix = depth > 0 ? '\u2003'.repeat(depth) + '↳ ' : '';
+      html += `<option value="${cat.id}">${prefix}${escapeHtml(cat.name)}</option>`;
+      addOptions(cat.id, depth + 1);
+    });
+  }
+  addOptions(null, 0);
+  html += `<option value="uncategorized">Uncategorized</option>`;
+  sel.innerHTML = html;
+  // The selected category may have been deleted elsewhere — fall back cleanly.
+  sel.value = prevValue;
+  if (sel.value !== prevValue) { ui.categoryFilter = 'all'; sel.value = 'all'; }
 }
 
 function statusBadge(status) {
@@ -2502,6 +2530,7 @@ function initToolbar() {
 
 function initListFilters() {
   document.getElementById('searchInput').oninput = e => { ui.search = e.target.value; renderList(); };
+  document.getElementById('categoryFilterSelect').onchange = e => { ui.categoryFilter = e.target.value; renderList(); };
 }
 
 function initTreeControls() {
