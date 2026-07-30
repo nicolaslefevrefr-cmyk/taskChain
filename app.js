@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v2.5';
+const APP_VERSION = 'v2.6';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -114,6 +114,7 @@ function createEmptyProject(name) {
     categories: [],
     nextIdNum: 1,
     locked: false,
+    sequentialPlanning: false,
   };
 }
 function createDefaultWorkspace() {
@@ -144,6 +145,7 @@ function normalizeProject(p) {
   });
   p.categories = p.categories || [];
   p.locked = !!p.locked;
+  p.sequentialPlanning = !!p.sequentialPlanning;
   if (!p.meta) p.meta = { projectName: 'Imported project', lastModified: nowISO() };
   if (!p.meta.projectName) p.meta.projectName = 'Imported project';
   if (!p.nextIdNum) {
@@ -528,6 +530,107 @@ function initCategoryTab() {
 }
 
 /* =========================================================
+   PROJECT SETTINGS TAB
+   Everything here acts on the CURRENTLY ACTIVE project (`state`) —
+   statuses are the one exception, shared across the whole workspace,
+   shown here too for convenience via the same list used in the
+   "⚙ Statuses" modal.
+   ========================================================= */
+function renderProjectSettingsTab() {
+  document.getElementById('settingsProjectName').textContent = state.meta.projectName;
+  renderStatusSettingsListInto('projectSettingsStatusList');
+
+  const lockBtn = document.getElementById('btnProjectSettingsLock');
+  lockBtn.textContent = state.locked ? '🔓 Unlock this project' : '🔒 Lock this project';
+
+  document.querySelectorAll('#planningModeToggle button').forEach(btn => {
+    const mode = state.sequentialPlanning ? 'sequential' : 'parallel';
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+
+  const locked = isActiveProjectLocked();
+  document.getElementById('btnProjectSettingsClear').disabled = locked;
+  document.getElementById('btnProjectSettingsImportTrigger').disabled = locked;
+  document.querySelectorAll('#planningModeToggle button').forEach(btn => { btn.disabled = locked; });
+}
+
+async function handleClearTasks() {
+  if (guardLocked('clear tasks')) return;
+  const choice = await showConfirm(
+    `Remove all tasks from "${state.meta.projectName}"? The project itself is kept — this only clears its tasks. Any unexported changes will be lost.`,
+    [
+      { label: 'Cancel', value: 'no' },
+      { label: 'Clear tasks', value: 'yes', danger: true, primary: true },
+    ]
+  );
+  if (choice !== 'yes') return;
+  state.tasks = [];
+  state.nextIdNum = 1;
+  saveState();
+  renderAll();
+}
+
+// Replaces the CURRENT project's own content with an imported single-
+// project JSON file (keeping the same project id, so it stays "this"
+// entry in the sidebar rather than becoming a new one).
+function importIntoCurrentProject(file) {
+  if (guardLocked('import into this project')) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      if (!Array.isArray(parsed.tasks)) throw new Error('invalid format');
+      const choice = await showConfirm(
+        `Replace all of "${state.meta.projectName}"'s tasks and categories with the content of this file? This can't be undone unless you've exported it.`,
+        [
+          { label: 'Cancel', value: 'no' },
+          { label: 'Replace', value: 'yes', danger: true, primary: true },
+        ]
+      );
+      if (choice !== 'yes') return;
+      normalizeProject(parsed);
+      state.tasks = parsed.tasks;
+      state.categories = parsed.categories;
+      state.nextIdNum = parsed.nextIdNum;
+      if (parsed.meta && parsed.meta.projectName) state.meta.projectName = parsed.meta.projectName;
+      state.sequentialPlanning = !!parsed.sequentialPlanning;
+      saveState();
+      renderAll();
+      toast('Project content replaced from JSON.');
+    } catch (e) {
+      toast('Invalid JSON file.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function initProjectSettingsTab() {
+  document.getElementById('btnAddStatusSettings').onclick = handleAddStatus;
+
+  document.getElementById('btnProjectSettingsLock').onclick = () => handleToggleProjectLock(state.id);
+  document.getElementById('btnProjectSettingsClear').onclick = handleClearTasks;
+  document.getElementById('btnProjectSettingsExport').onclick = () => exportProjectJSON(state);
+  document.getElementById('btnProjectSettingsImportTrigger').onclick = () => {
+    if (guardLocked('import into this project')) return;
+    document.getElementById('projectSettingsImportFile').click();
+  };
+  document.getElementById('projectSettingsImportFile').onchange = e => {
+    if (e.target.files[0]) importIntoCurrentProject(e.target.files[0]);
+    e.target.value = '';
+  };
+  document.getElementById('btnProjectSettingsDelete').onclick = () => handleDeleteProject(state.id);
+
+  document.querySelectorAll('#planningModeToggle button').forEach(btn => {
+    btn.onclick = () => {
+      if (guardLocked('change the planning mode')) return;
+      state.sequentialPlanning = btn.dataset.mode === 'sequential';
+      saveState();
+      renderAll();
+    };
+  });
+}
+
+/* =========================================================
    SCHEDULE ENGINE
    For every task computes { finish, finishSource, start, conflict }.
    Dates propagate in BOTH directions and the whole graph is relaxed
@@ -630,7 +733,89 @@ function computeSchedule() {
       derivedFinish: backwardRequirement,
     };
   });
+
+  if (state.sequentialPlanning) applySequentialAdjustment(out);
   return out;
+}
+
+function taskIdNum(id) {
+  const n = parseInt(String(id).split('-')[1], 10);
+  return isNaN(n) ? 0 : n;
+}
+
+// For "sequential" planning: children of the same parent are treated as
+// if only one person worked through them, one after another (in a
+// stable, deterministic order — by task ID) instead of all starting the
+// moment the parent finishes. A task with several parents gets this
+// treatment under each of them.
+function getPreviousSiblingsForTask(task) {
+  const result = [];
+  task.parents.forEach(pid => {
+    const siblings = getChildren(pid).slice().sort((a, b) => taskIdNum(a.id) - taskIdNum(b.id));
+    const idx = siblings.findIndex(s => s.id === task.id);
+    if (idx > 0) result.push(siblings[idx - 1]);
+  });
+  return result;
+}
+
+// Pushes starts later (never earlier) to respect sibling ordering, using
+// a proper topological sort over BOTH the real parent→child edges and
+// the virtual "previous sibling → next sibling" edges, so that by the
+// time any task is adjusted, everything it depends on (parents AND
+// previous siblings) has already been finalized in this same sweep —
+// a single pass is enough, with no risk of locking in a too-early date
+// before a sibling's push-back is known (Kahn's algorithm; any leftover
+// tasks from an unexpected cycle just fall back to ID order).
+function applySequentialAdjustment(schedule) {
+  const dependsOn = {};
+  state.tasks.forEach(t => {
+    const deps = new Set(t.parents.filter(pid => getTask(pid)));
+    getPreviousSiblingsForTask(t).forEach(sib => deps.add(sib.id));
+    dependsOn[t.id] = deps;
+  });
+
+  const dependents = {};
+  state.tasks.forEach(t => { dependents[t.id] = []; });
+  state.tasks.forEach(t => { dependsOn[t.id].forEach(srcId => { if (dependents[srcId]) dependents[srcId].push(t.id); }); });
+
+  const remaining = {};
+  state.tasks.forEach(t => { remaining[t.id] = dependsOn[t.id].size; });
+
+  let queue = state.tasks.filter(t => remaining[t.id] === 0).map(t => t.id);
+  const order = [];
+  const seen = new Set();
+  while (queue.length) {
+    queue.sort((a, b) => taskIdNum(a) - taskIdNum(b));
+    const id = queue.shift();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    order.push(id);
+    dependents[id].forEach(depId => {
+      remaining[depId]--;
+      if (remaining[depId] === 0) queue.push(depId);
+    });
+  }
+  state.tasks.forEach(t => { if (!seen.has(t.id)) order.push(t.id); }); // cycle fallback
+
+  order.forEach(id => {
+    const task = getTask(id);
+    const sched = schedule[id];
+    if (!sched.start) return;
+    let minStart = sched.start;
+    getPreviousSiblingsForTask(task).forEach(sib => {
+      const sibSched = schedule[sib.id];
+      if (sibSched && sibSched.finish) {
+        const cand = nextBusinessDay(sibSched.finish);
+        if (cand > minStart) minStart = cand;
+      }
+    });
+    if (minStart > sched.start) {
+      sched.start = minStart;
+      sched.finish = (task.duration != null && task.duration > 0)
+        ? addBusinessDays(minStart, task.duration - 1)
+        : minStart;
+    }
+  });
 }
 
 /* =========================================================
@@ -916,8 +1101,15 @@ function initSidebar() {
    one that's still in use moves the affected tasks (in ALL projects,
    not just the active one) to the next remaining status.
    ========================================================= */
+const STATUS_SETTINGS_CONTAINERS = ['statusSettingsList', 'projectSettingsStatusList'];
+
 function renderStatusSettingsList() {
-  const wrap = document.getElementById('statusSettingsList');
+  STATUS_SETTINGS_CONTAINERS.forEach(renderStatusSettingsListInto);
+}
+
+function renderStatusSettingsListInto(containerId) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
   const statuses = getStatuses();
   wrap.innerHTML = statuses.map((s, i) => `
     <div class="status-setting-row">
@@ -2109,6 +2301,7 @@ function renderAll() {
   renderKanban();
   renderTimeline();
   renderCategoryTab();
+  renderProjectSettingsTab();
   renderSidebar();
   document.getElementById('projectNameInput').value = state.meta.projectName;
   document.getElementById('projectNameInput').disabled = isActiveProjectLocked();
@@ -2383,6 +2576,7 @@ function loadExampleData() {
     meta: { projectName: 'Example — Mechanical component', lastModified: nowISO() },
     nextIdNum: 8,
     locked: false,
+    sequentialPlanning: false,
     categories: [
       { id: catEngineering, name: 'Engineering', parentId: null },
       { id: catDesign, name: 'Design', parentId: catEngineering },
@@ -2481,21 +2675,6 @@ function initToolbar() {
     e.target.value = '';
   };
   document.getElementById('btnLoadExample').onclick = () => loadExampleData();
-  document.getElementById('btnReset').onclick = async () => {
-    if (guardLocked('clear tasks')) return;
-    const choice = await showConfirm(
-      `Remove all tasks from "${state.meta.projectName}"? The project itself is kept — this only clears its tasks. Any unexported changes will be lost.`,
-      [
-        { label: 'Cancel', value: 'no' },
-        { label: 'Clear tasks', value: 'yes', danger: true, primary: true },
-      ]
-    );
-    if (choice !== 'yes') return;
-    state.tasks = [];
-    state.nextIdNum = 1;
-    saveState();
-    renderAll();
-  };
 
   document.getElementById('projectNameInput').oninput = e => {
     if (isActiveProjectLocked()) { e.target.value = state.meta.projectName; return; }
@@ -2677,6 +2856,7 @@ function init() {
   initSidebar();
   initStatusSettings();
   initCategoryTab();
+  initProjectSettingsTab();
   renderAll();
 }
 

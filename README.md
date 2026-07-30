@@ -14,11 +14,13 @@ A 100% front-end web app (HTML / CSS / JS, no dependencies, no build step) for t
 - **Customizable statuses, shared across your whole workspace**: the "⚙ Statuses" button lets you add, rename, recolor, reorder, or delete statuses — they apply to every project. New workspaces start with six defaults: `Not Started`, `Working`, `Done`, `In Release Process`, `Released`, `Rework`, each with its own color. Deleting a status that's still in use moves those tasks to the next one, after asking you to confirm. (Existing workspaces keep whatever statuses they already have — this default set only applies to brand-new ones.)
 - **Status changes always go through one simple dialog**: moving a task to any status (via drag-and-drop or the edit form) opens a small dialog to log a date-stamped reason and — if that task has children — asks whether to also apply the change to them. That checkbox starts **unchecked every time**; there's no special-casing of any particular status. If you do propagate, the same reason is copied into every affected child's history.
 - **Clear a task's history** with one button in its edit window — removes every entry except the original creation one, after confirming.
-- **4 tabs**:
+- **5 tabs**:
   - **List** — filterable/searchable table with inline editing. Click any of the ID/Title/Status/Priority/Deadline/Duration column headers to sort by it (click again to flip ascending/descending — the arrow shows the current sort). The Category column shows the task's assigned categories, and a dropdown next to the search box filters the list by category — picking a parent category also includes tasks tagged only with one of its subcategories, and there's an "Uncategorized" option too.
   - **Tree** — a real node-link diagram: every task is a box, drawn exactly once, with an arrow from each of its parents to it (so a task with several parents just gets several incoming arrows — nothing is duplicated). Drag any box to reposition it — connected arrows follow in real time, arrowheads included, and the position is saved automatically (double-click a box to snap it back to the automatic layout, or use "Reset layout" to clear all of them at once). Zoom in/out buttons and a "Fit" button are provided; the automatic layout uses a simple layered arrangement (a task always sits below every parent that feeds into it) with a couple of passes to reduce crossing lines — no physics/force simulation.
   - **Planning** — Kanban board (drag a card to another status column) plus a schedule-aware timeline (Gantt) underneath. Each Kanban column can be individually collapsed to a narrow strip (handy once you have several statuses) — a collapsed column still accepts a dropped card. The board scrolls horizontally instead of overflowing if there isn't room for every column at once, and it and the timeline both get more breathing room when the sidebar is collapsed.
   - **Category** — the collapsible category tree described above.
+  - **Settings** — per-project settings, pushed to the far right of the tab bar: the shared status list (same one as the "⚙ Statuses" modal, kept in sync), a Parallel/Sequential planning toggle (see below), and this project's own actions — lock/unlock, clear all its tasks, export it as JSON, import a JSON file to replace its content, or delete the project entirely.
+- **Parallel vs. sequential planning** (per project, in the Settings tab): by default, tasks that share the same parent are scheduled in **parallel** — they can all start the moment the parent finishes. Switch a project to **sequential** and they're chained instead, one after another in a stable order, as if a single person worked through them one at a time — the first starts when the parent finishes, the second when the first finishes, and so on. This uses a proper dependency-respecting ordering (not just a simple date shift), so it stays correct even when a task's own schedule is independently affected by a completely different, later-resolving dependency elsewhere in the project.
 - **Chain-aware scheduling ("retro-planning") built into the Planning tab**: a task doesn't need its own deadline to appear on the timeline. Dates propagate through the whole dependency graph in **both directions**, repeatedly, until nothing changes — a task with children but no deadline of its own gets one calculated backward from them, and a task with no deadline or children of its own can still get scheduled *forward* the moment one of its parents becomes known. Solving one task's date this way can be exactly what unlocks a sibling or a task further along the chain, so the app re-passes over the whole project until it reaches a fixed point instead of computing everything in one shot. Calculated dates show as dashed bars on the timeline and in gray in the List/edit-modal. If a task's own deadline is later than what its descendants require, it's flagged as a conflict (red outline / warning icon).
 - **Weekends are excluded** from every date calculation (durations, calculated deadlines, bar lengths), and a bar that spans a weekend is visually **split in two** (with a thin connector) rather than drawn as one continuous rectangle, so the pause is obvious at a glance.
 - **Timeline controls**: zoom in/out buttons to change the day granularity (bars hide their inner text when they get too small), light vertical lines separating each week, and weekend columns lightly shaded.
@@ -43,29 +45,43 @@ A **whole-workspace** export (from the header's "Export JSON") looks like:
 ```json
 {
   "activeProjectId": "p1a2b3c4",
+  "statuses": [
+    { "key": "working", "label": "Working", "color": "#2563EB" },
+    { "key": "released", "label": "Released", "color": "#15803D" }
+  ],
   "projects": [
     {
       "id": "p1a2b3c4",
       "meta": { "projectName": "My project", "lastModified": "2026-07-23T10:00:00.000Z" },
       "nextIdNum": 3,
+      "locked": false,
+      "sequentialPlanning": false,
+      "categories": [
+        { "id": "cat1", "name": "Design", "parentId": null }
+      ],
       "tasks": [
         {
           "id": "T-1",
           "title": "Component design",
+          "description": "",
           "link": "https://example.com",
           "status": "working",
+          "priority": "medium",
           "deadline": null,
           "duration": 5,
           "parents": [],
+          "categories": ["cat1"],
           "history": [{ "date": "2026-07-01", "note": "Task created" }]
         },
         {
           "id": "T-2",
           "title": "Component calculations",
           "status": "released",
+          "priority": "high",
           "deadline": "2026-08-05",
           "duration": 4,
           "parents": ["T-1"],
+          "categories": ["cat1"],
           "history": []
         }
       ]
@@ -73,7 +89,7 @@ A **whole-workspace** export (from the header's "Export JSON") looks like:
   ]
 }
 ```
-A **single-project** export (from a project's "⬇" icon in the sidebar) is just one entry from that `projects` array on its own (with `id`, `meta`, `nextIdNum`, `tasks`) — this is also the older format used before multi-project support, so old exports still import fine (as a new project added to your workspace).
+`statuses` lives at the workspace level (shared by every project); `locked`, `sequentialPlanning`, and `categories` live on each project; `description`, `priority`, and `categories` live on each task. A **single-project** export (from a project's "⬇" icon, in the sidebar or in its Settings tab) is just one entry from that `projects` array on its own — this is also the older format used before multi-project support, so old exports still import fine (missing fields get sensible defaults).
 
 In the example above `T-2` has an explicit deadline; `T-1` has none, so the app automatically calculates one for it (business days only) from `T-2`'s deadline and duration.
 

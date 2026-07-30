@@ -35,7 +35,6 @@
         <button class="btn btn-ghost" id="btnQuickSave" title="Save the whole workspace to Firebase right away, using your saved connection">💾 Save</button>
         <button class="btn btn-ghost" id="btnFirebase" title="Save or load your whole workspace from Firebase">☁ Firebase</button>
         <button class="btn btn-ghost" id="btnStatusSettings" title="Manage the statuses available for tasks">⚙ Statuses</button>
-        <button class="btn btn-ghost" id="btnReset" title="Remove all tasks from this project (keeps the project itself)">Clear tasks</button>
       </div>
       <button class="btn btn-primary" id="btnNewTask">+ New task</button>
     </div>
@@ -62,6 +61,7 @@
         <button class="tab-btn" data-tab="tree">Tree</button>
         <button class="tab-btn" data-tab="planning">Planning</button>
         <button class="tab-btn" data-tab="category">Category</button>
+        <button class="tab-btn tab-btn-settings" data-tab="settings">Settings</button>
       </nav>
 
       <main class="content">
@@ -147,6 +147,43 @@
         <button class="btn btn-primary btn-sm" id="btnNewCategory">+ New category</button>
       </div>
       <div class="category-tree-wrap" id="categoryTreeWrap"></div>
+    </section>
+
+    <!-- ===================== TAB: SETTINGS (per-project) ===================== -->
+    <section class="tab-panel" id="panel-settings">
+      <div class="panel-toolbar">
+        <p class="panel-hint">Settings for the current project only — <strong id="settingsProjectName"></strong>. Statuses are the exception: they're shared across your whole workspace.</p>
+      </div>
+
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3 class="section-title">Statuses</h3>
+          <p class="panel-hint" style="margin-bottom:12px;">Shared across every project in your workspace.</p>
+          <div id="projectSettingsStatusList"></div>
+          <button class="btn btn-ghost btn-sm" id="btnAddStatusSettings" style="margin-top:12px;">+ Add status</button>
+        </div>
+
+        <div class="settings-card">
+          <h3 class="section-title">Planning</h3>
+          <p class="panel-hint" style="margin-bottom:12px;">How tasks that share the same parent are scheduled in the Planning timeline.</p>
+          <div class="planning-mode-toggle" id="planningModeToggle">
+            <button type="button" data-mode="parallel">Parallel<span class="planning-mode-sub">Children can run at the same time</span></button>
+            <button type="button" data-mode="sequential">Sequential<span class="planning-mode-sub">One at a time, as if worked by one person</span></button>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3 class="section-title">This project</h3>
+          <div class="settings-actions">
+            <button class="btn btn-ghost" id="btnProjectSettingsLock"></button>
+            <button class="btn btn-ghost" id="btnProjectSettingsClear">Clear all tasks</button>
+            <button class="btn btn-ghost" id="btnProjectSettingsExport">⬇ Export this project as JSON</button>
+            <button class="btn btn-ghost" id="btnProjectSettingsImportTrigger">⬆ Import JSON into this project</button>
+            <input type="file" id="projectSettingsImportFile" accept="application/json" hidden>
+            <button class="btn btn-danger-ghost" id="btnProjectSettingsDelete">🗑 Delete this project</button>
+          </div>
+        </div>
+      </div>
     </section>
 
       </main>
