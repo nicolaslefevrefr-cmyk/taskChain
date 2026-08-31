@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v3.0';
+const APP_VERSION = 'v3.1';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -90,6 +90,7 @@ let ui = {
   search: '',
   statusFilter: 'all',
   categoryFilter: 'all',
+  timelineHighlightCategories: new Set(),
   editingTaskId: null,
   draftHistory: [],
   draftCategories: [],
@@ -2250,7 +2251,46 @@ async function handleStatusDrop(taskId, newStatus) {
 /* =========================================================
    RENDER: TIMELINE (schedule-aware Gantt, weekly grid, zoomable)
    ========================================================= */
+// Chip row above the timeline: click a category to highlight tasks
+// tagged with it (or one of its subcategories) — everything else dims,
+// without hiding anything outright. Multi-select: several categories
+// can be highlighted at once.
+function renderTimelineCategoryHighlight() {
+  const wrap = document.getElementById('timelineCategoryHighlight');
+  if (!getCategories().length) { wrap.innerHTML = ''; return; }
+
+  let html = '';
+  function addChips(parentId, depth) {
+    getCategoryChildren(parentId).forEach(cat => {
+      const prefix = depth > 0 ? '\u2003'.repeat(depth) + '↳ ' : '';
+      const active = ui.timelineHighlightCategories.has(cat.id);
+      html += `<button type="button" class="chip${active ? ' active' : ''}" data-cat="${cat.id}">${prefix}${escapeHtml(cat.name)}</button>`;
+      addChips(cat.id, depth + 1);
+    });
+  }
+  addChips(null, 0);
+  if (ui.timelineHighlightCategories.size) {
+    html += `<button type="button" class="chip chip-clear-highlight" id="btnClearTimelineHighlight">Clear highlight</button>`;
+  }
+  wrap.innerHTML = html;
+
+  wrap.querySelectorAll('[data-cat]').forEach(chip => {
+    chip.onclick = () => {
+      const id = chip.dataset.cat;
+      if (ui.timelineHighlightCategories.has(id)) ui.timelineHighlightCategories.delete(id);
+      else ui.timelineHighlightCategories.add(id);
+      renderTimeline();
+    };
+  });
+  const clearBtn = document.getElementById('btnClearTimelineHighlight');
+  if (clearBtn) clearBtn.onclick = () => {
+    ui.timelineHighlightCategories.clear();
+    renderTimeline();
+  };
+}
+
 function renderTimeline() {
+  renderTimelineCategoryHighlight();
   const wrap = document.getElementById('timelineWrap');
   const schedule = computeSchedule();
   const items = state.tasks
@@ -2258,7 +2298,7 @@ function renderTimeline() {
     .filter(x => x.sched.finish);
 
   if (!items.length) {
-    wrap.innerHTML = '<div class="timeline-empty">Add a deadline (ideally with a duration) to at least one task in a chain. Linked tasks without their own deadline will then get a calculated date automatically.</div>';
+    wrap.innerHTML = '<div class="timeline-empty">Add a start or end date (ideally with a duration) to at least one task in a chain. Linked tasks without their own dates will then get a calculated date automatically.</div>';
     return;
   }
 
@@ -2284,6 +2324,18 @@ function renderTimeline() {
 
   const gridOverlay = buildGridOverlay(minDate, totalDays, pxPerDay, items.length);
   const ruler = buildRuler(minDate, totalDays, pxPerDay);
+
+  // If any category chips are highlighted, everything NOT tagged with
+  // one of them (or one of their subcategories) gets visually dimmed.
+  let highlightAllowed = null;
+  if (ui.timelineHighlightCategories.size) {
+    highlightAllowed = new Set();
+    ui.timelineHighlightCategories.forEach(cid => {
+      highlightAllowed.add(cid);
+      getCategoryDescendantIds(cid).forEach(id => highlightAllowed.add(id));
+    });
+  }
+  const isDimmed = (task) => highlightAllowed && !(task.categories || []).some(cid => highlightAllowed.has(cid));
 
   const rows = items.map(({ task, sched }) => {
     const meta = getStatusMeta(task.status);
@@ -2335,7 +2387,7 @@ function renderTimeline() {
       innerHtml = bridgeHtml + segHtml + handleHtml;
     }
 
-    return `<div class="timeline-row">
+    return `<div class="timeline-row${isDimmed(task) ? ' timeline-row-dimmed' : ''}">
       <div class="timeline-label">
         <span class="id-tag">${task.id}</span>
         <span>${escapeHtml(task.title)}</span>
@@ -2398,6 +2450,7 @@ function wireTimelineDragHandle(el) {
       origStart: sched.start,
       origEnd: sched.finish,
       origDuration: task.duration,
+      originalSchedule: schedule, // snapshot before any dragging — used to detect continuity for cascading
       lastDeltaDays: 0,
       moved: false,
     };
@@ -2420,6 +2473,39 @@ function wireTimelineDragHandle(el) {
 // at all — relying on one to reset a "just dragged" flag would leave it
 // stuck forever after the first real drag.
 let timelineDrag = null;
+
+// After a drag changes the dragged task's FINISH date (a move shifts
+// both start and finish together; resize-right changes only finish;
+// resize-left changes only start, so this naturally does nothing for
+// it), any child that had NO gap — its start was exactly the next
+// business day after the ORIGINAL finish — is shifted by the same
+// amount, and so on down the chain, so continuous sequences move
+// together. A child with deliberate slack, or one whose date is only
+// ever chain-calculated (no explicit dates of its own — it already
+// recomputes automatically), is left alone.
+function cascadeContinuousDescendants(taskId, finishDeltaDays, originalSchedule, visited) {
+  if (finishDeltaDays === 0) return;
+  const parentOrig = originalSchedule[taskId];
+  if (!parentOrig || !parentOrig.finish) return;
+  const requiredStart = nextBusinessDay(parentOrig.finish);
+
+  getChildren(taskId).forEach(child => {
+    if (visited.has(child.id)) return;
+    if (!child.startDate) return; // purely chain-derived — recomputes on its own
+    const childOrig = originalSchedule[child.id];
+    if (!childOrig || childOrig.start !== requiredStart) return; // had a gap — don't disturb it
+
+    visited.add(child.id);
+    const newStart = snapToNearestBusinessDay(addDays(child.startDate, finishDeltaDays));
+    child.startDate = newStart;
+    child.endDate = (child.duration != null && child.duration > 0)
+      ? addBusinessDays(newStart, child.duration - 1)
+      : newStart;
+
+    const childFinishDelta = daysBetween(childOrig.finish, child.endDate);
+    cascadeContinuousDescendants(child.id, childFinishDelta, originalSchedule, visited);
+  });
+}
 
 function initTimelineDragHandlers() {
   document.addEventListener('mousemove', (e) => {
@@ -2456,6 +2542,10 @@ function initTimelineDragHandlers() {
       task.endDate = newEnd;
       task.duration = businessDaysBetweenInclusive(timelineDrag.origStart, newEnd) || 1;
     }
+
+    const finishDelta = daysBetween(timelineDrag.origEnd, task.endDate);
+    cascadeContinuousDescendants(timelineDrag.taskId, finishDelta, timelineDrag.originalSchedule, new Set([timelineDrag.taskId]));
+
     renderTimeline();
   });
 
