@@ -417,12 +417,16 @@ a{color:var(--accent);}
 .timeline-bar{
   position:absolute;top:9px;height:22px;border-radius:5px;
   font-size:10.5px;color:#fff;display:flex;align-items:center;padding:0 8px;gap:5px;
-  white-space:nowrap;overflow:hidden;font-weight:600;box-shadow:var(--shadow-sm);cursor:pointer;
+  white-space:nowrap;overflow:hidden;font-weight:600;box-shadow:var(--shadow-sm);
 }
 .timeline-bar.derived{background:transparent;border:2px dashed currentColor;color:var(--text-secondary);box-shadow:none;}
 .timeline-bar.conflict{outline:2px solid var(--danger);outline-offset:1px;}
 .timeline-bar.compact{padding:0 4px;justify-content:center;}
 .timeline-bar-bridge{position:absolute;top:19px;height:2px;background:currentColor;opacity:.35;pointer-events:none;}
+.timeline-drag-handle{
+  position:absolute;top:9px;height:22px;background:transparent;cursor:grab;z-index:2;
+}
+.timeline-drag-handle:active{cursor:grabbing;}
 .timeline-milestone{
   position:absolute;top:11px;width:16px;height:16px;transform:translateX(-50%) rotate(45deg);
   cursor:pointer;box-shadow:var(--shadow-sm);border:1.5px solid rgba(20,26,33,.15);

@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v2.6';
+const APP_VERSION = 'v3.0';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -142,6 +142,22 @@ function normalizeProject(p) {
     t.categories = t.categories || [];
     t.description = t.description || '';
     if (!['low', 'medium', 'high'].includes(t.priority)) t.priority = 'medium';
+    // Legacy migration: a single "deadline" field used to be the only
+    // date on a task (effectively its end date). Now start/end/duration
+    // are all explicit and kept in sync with each other.
+    if (t.deadline !== undefined) {
+      if (t.endDate === undefined) t.endDate = t.deadline;
+      delete t.deadline;
+    }
+    t.endDate = t.endDate || null;
+    t.startDate = t.startDate || null;
+    if (t.startDate && t.endDate && t.duration == null) {
+      t.duration = businessDaysBetweenInclusive(t.startDate, t.endDate);
+    } else if (t.endDate && t.duration != null && !t.startDate) {
+      t.startDate = subtractBusinessDays(t.endDate, Math.max(0, t.duration - 1));
+    } else if (t.startDate && t.duration != null && !t.endDate) {
+      t.endDate = addBusinessDays(t.startDate, Math.max(0, t.duration - 1));
+    }
   });
   p.categories = p.categories || [];
   p.locked = !!p.locked;
@@ -261,6 +277,28 @@ function subtractBusinessDays(dateStr, n) {
   let d = dateStr;
   for (let i = 0; i < n; i++) d = previousBusinessDay(d);
   return d;
+}
+// Inclusive count of business days from start to end (both counted).
+// Returns null if end is before start (an invalid range).
+function businessDaysBetweenInclusive(startStr, endStr) {
+  if (endStr < startStr) return null;
+  let count = 0;
+  let cur = startStr;
+  while (cur <= endStr) {
+    if (!isWeekend(cur)) count++;
+    cur = addDays(cur, 1);
+  }
+  return count;
+}
+// Used when dragging a timeline bar: if a computed date lands on a
+// weekend, snap it to whichever business day is closer (Saturday →
+// the Friday before, Sunday → the Monday after) instead of leaving a
+// task oddly starting/ending on a non-working day.
+function snapToNearestBusinessDay(dateStr) {
+  const d = dayOfWeek(dateStr);
+  if (d === 6) return previousBusinessDay(dateStr);
+  if (d === 0) return nextBusinessDay(dateStr);
+  return dateStr;
 }
 
 // Splits [start, finish] into the maximal runs of consecutive business
@@ -652,9 +690,9 @@ function initProjectSettingsTab() {
 function computeSchedule() {
   const finish = {}, finishSource = {}, start = {};
   state.tasks.forEach(t => {
-    finish[t.id] = t.deadline || null;
-    finishSource[t.id] = t.deadline ? 'explicit' : null;
-    start[t.id] = null;
+    finish[t.id] = t.endDate || null;
+    finishSource[t.id] = t.endDate ? 'explicit' : null;
+    start[t.id] = t.startDate || null;
   });
 
   const deriveStartFromFinish = (task) => {
@@ -668,10 +706,16 @@ function computeSchedule() {
     finish[task.id] = (task.duration != null && task.duration > 0)
       ? addBusinessDays(start[task.id], task.duration - 1)
       : start[task.id];
-    finishSource[task.id] = 'derived';
+    // If the task's OWN startDate was set explicitly, this finish is a
+    // deliberate choice (start + duration), not something chain-inferred.
+    finishSource[task.id] = task.startDate ? 'explicit' : 'derived';
   };
 
+  // A task can have EITHER an explicit start, an explicit end, or both
+  // (kept in sync with duration by the edit form) — cross-derive
+  // whichever side is still missing before the chain propagation below.
   state.tasks.forEach(deriveStartFromFinish);
+  state.tasks.forEach(deriveFinishFromStart);
 
   let changed = true;
   let guard = 0;
@@ -714,7 +758,7 @@ function computeSchedule() {
 
   // Final pass purely to flag deadline conflicts: the tightest finish a
   // task's children require, regardless of whether that value ended up
-  // being used (an explicit deadline always wins as the displayed date).
+  // being used (an explicit start/end always wins as the displayed date).
   const out = {};
   state.tasks.forEach(task => {
     let backwardRequirement = null;
@@ -724,7 +768,8 @@ function computeSchedule() {
         if (backwardRequirement === null || cand < backwardRequirement) backwardRequirement = cand;
       }
     }
-    const conflict = !!(task.deadline && backwardRequirement && backwardRequirement < task.deadline);
+    const hasExplicitAnchor = !!(task.startDate || task.endDate);
+    const conflict = !!(hasExplicitAnchor && finish[task.id] && backwardRequirement && backwardRequirement < finish[task.id]);
     out[task.id] = {
       finish: finish[task.id],
       finishSource: finishSource[task.id],
@@ -831,7 +876,8 @@ function upsertTaskFromForm() {
   const priorityBtn = document.querySelector('#priorityToggle button.active');
   const priority = priorityBtn ? priorityBtn.dataset.priority : 'medium';
   const link = document.getElementById('taskLink').value.trim();
-  const deadline = document.getElementById('taskDeadline').value || null;
+  const startDate = document.getElementById('taskStartDate').value || null;
+  const endDate = document.getElementById('taskEndDate').value || null;
   const durationRaw = document.getElementById('taskDuration').value;
   const duration = durationRaw === '' ? null : Math.max(0, parseInt(durationRaw, 10));
   const parents = ui.draftParents.slice();
@@ -843,7 +889,8 @@ function upsertTaskFromForm() {
     task.title = title;
     task.description = description;
     task.link = link;
-    task.deadline = deadline;
+    task.startDate = startDate;
+    task.endDate = endDate;
     task.duration = duration;
     task.parents = parents.filter(p => p !== id);
     task.categories = categories;
@@ -856,7 +903,7 @@ function upsertTaskFromForm() {
   } else {
     const newId = generateId();
     const task = {
-      id: newId, title, description, link, status, priority, deadline, duration,
+      id: newId, title, description, link, status, priority, startDate, endDate, duration,
       parents, categories,
       history: history.length ? history : [{ date: todayStr(), note: 'Task created' }],
       createdAt: nowISO(),
@@ -1290,7 +1337,8 @@ function openTaskModal(taskId) {
   populateStatusSelect(task ? task.status : getStatuses()[0].key);
   setPriorityToggle(task ? (task.priority || 'medium') : 'medium');
   document.getElementById('taskLink').value = task ? (task.link || '') : '';
-  document.getElementById('taskDeadline').value = task ? (task.deadline || '') : '';
+  document.getElementById('taskStartDate').value = task ? (task.startDate || '') : '';
+  document.getElementById('taskEndDate').value = task ? (task.endDate || '') : '';
   document.getElementById('taskDuration').value = task && task.duration != null ? task.duration : '';
   document.getElementById('historyDateInput').value = todayStr();
   document.getElementById('historyNoteInput').value = '';
@@ -1308,7 +1356,7 @@ function openTaskModal(taskId) {
   if (task) {
     refreshModalComputedDisplays(task.id);
   } else {
-    document.getElementById('taskDeadlineNote').textContent = '';
+    document.getElementById('taskDateNote').textContent = '';
   }
 
   applyTaskModalLockState();
@@ -1320,6 +1368,51 @@ function openTaskModal(taskId) {
 function setPriorityToggle(value) {
   document.querySelectorAll('#priorityToggle button').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.priority === value);
+  });
+}
+
+// Keeps the Start date / End date / Duration fields in the task modal
+// in sync — editing any one recalculates whichever of the other two it
+// can (in business days). Editing duration keeps the start fixed and
+// moves the end (the usual "extend from the start" convention).
+function wireDateLinking() {
+  const startEl = document.getElementById('taskStartDate');
+  const endEl = document.getElementById('taskEndDate');
+  const durEl = document.getElementById('taskDuration');
+
+  startEl.addEventListener('change', () => {
+    const start = startEl.value;
+    if (!start) return;
+    if (endEl.value) {
+      if (endEl.value < start) endEl.value = start;
+      durEl.value = businessDaysBetweenInclusive(start, endEl.value);
+    } else if (durEl.value) {
+      const dur = Math.max(1, parseInt(durEl.value, 10) || 1);
+      endEl.value = addBusinessDays(start, dur - 1);
+    }
+  });
+
+  endEl.addEventListener('change', () => {
+    const end = endEl.value;
+    if (!end) return;
+    if (startEl.value) {
+      if (startEl.value > end) startEl.value = end;
+      durEl.value = businessDaysBetweenInclusive(startEl.value, end);
+    } else if (durEl.value) {
+      const dur = Math.max(1, parseInt(durEl.value, 10) || 1);
+      startEl.value = subtractBusinessDays(end, dur - 1);
+    }
+  });
+
+  durEl.addEventListener('change', () => {
+    if (durEl.value === '') return;
+    const dur = Math.max(0, parseInt(durEl.value, 10) || 0);
+    if (dur <= 0) return;
+    if (startEl.value) {
+      endEl.value = addBusinessDays(startEl.value, dur - 1);
+    } else if (endEl.value) {
+      startEl.value = subtractBusinessDays(endEl.value, dur - 1);
+    }
   });
 }
 
@@ -1532,7 +1625,7 @@ function populateStatusSelect(selectedKey) {
 function applyTaskModalLockState() {
   const locked = isActiveProjectLocked();
   document.getElementById('taskLockBanner').hidden = !locked;
-  ['taskTitle', 'taskDescription', 'taskStatus', 'taskLink', 'taskDeadline', 'taskDuration', 'historyDateInput', 'historyNoteInput']
+  ['taskTitle', 'taskDescription', 'taskStatus', 'taskLink', 'taskStartDate', 'taskEndDate', 'taskDuration', 'historyDateInput', 'historyNoteInput']
     .forEach(id => { document.getElementById(id).disabled = locked; });
   document.querySelectorAll('#priorityToggle button').forEach(btn => { btn.disabled = locked; });
   document.getElementById('btnEditCategories').disabled = locked;
@@ -1549,17 +1642,17 @@ function refreshModalComputedDisplays(taskId) {
   const schedule = computeSchedule();
   const sched = schedule[taskId];
 
-  const noteEl = document.getElementById('taskDeadlineNote');
-  if (task.deadline) {
+  const noteEl = document.getElementById('taskDateNote');
+  if (task.startDate || task.endDate) {
     if (sched.conflict) {
-      noteEl.textContent = `⚠ Needs to finish by ${formatDate(sched.derivedFinish)} to meet linked tasks' deadlines — the current deadline is later than that.`;
+      noteEl.textContent = `⚠ Needs to finish by ${formatDate(sched.derivedFinish)} to meet linked tasks' dates — the current end date is later than that.`;
       noteEl.className = 'field-note conflict';
     } else {
       noteEl.textContent = '';
       noteEl.className = 'field-note';
     }
   } else if (sched.finish) {
-    noteEl.textContent = `Calculated from linked tasks: ${formatDate(sched.finish)} (leave empty to keep using this automatically)`;
+    noteEl.textContent = `Calculated from linked tasks: ${formatDate(sched.start)} → ${formatDate(sched.finish)} (leave start/end empty to keep using this automatically)`;
     noteEl.className = 'field-note';
   } else {
     noteEl.textContent = '';
@@ -1663,7 +1756,7 @@ function getFilteredTasks() {
   const statusOrder = getStatuses().map(s => s.key);
   const priorityOrder = { low: 0, medium: 1, high: 2 };
   const dir = ui.sortDirection === 'desc' ? -1 : 1;
-  const effectiveDeadline = (t) => t.deadline || (schedule[t.id] && schedule[t.id].finish) || null;
+  const effectiveDeadline = (t) => t.endDate || (schedule[t.id] && schedule[t.id].finish) || null;
 
   list.sort((a, b) => {
     switch (ui.sortColumn) {
@@ -1710,8 +1803,8 @@ function renderList() {
 
     const sched = schedule[t.id];
     let deadlineHtml;
-    if (t.deadline) {
-      deadlineHtml = formatDate(t.deadline);
+    if (t.endDate) {
+      deadlineHtml = formatDate(t.endDate);
       if (sched.conflict) {
         deadlineHtml += ` <span class="conflict-icon" title="Needs to finish by ${formatDate(sched.derivedFinish)} based on linked tasks">⚠</span>`;
       }
@@ -1949,7 +2042,7 @@ function renderTree() {
       </div>
       <div class="tree-box-bottom">
         ${statusBadge(t.status)}
-        ${t.deadline ? `<span class="label-hint">${formatDate(t.deadline)}</span>` : ''}
+        ${t.endDate ? `<span class="label-hint">${formatDate(t.endDate)}</span>` : ''}
         ${badge}
       </div>
     </div>`;
@@ -2057,7 +2150,7 @@ function renderKanban() {
 
   board.innerHTML = statuses.map(s => {
     const tasks = state.tasks.filter(t => t.status === s.key)
-      .sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
+      .sort((a, b) => (a.endDate || '9999').localeCompare(b.endDate || '9999'));
     const collapsed = ui.collapsedKanbanColumns.has(s.key);
 
     if (collapsed) {
@@ -2140,7 +2233,7 @@ function kanbanCardHtml(t) {
     <div class="kanban-card-title">${escapeHtml(t.title)}</div>
     <div class="kanban-card-meta">
       <span class="kanban-card-id">${t.id}</span>
-      ${t.deadline ? `<span>· ${formatDate(t.deadline)}</span>` : ''}
+      ${t.endDate ? `<span>· ${formatDate(t.endDate)}</span>` : ''}
       ${childCount ? `<span class="kanban-card-children">· ${childCount} child${childCount > 1 ? 'ren' : ''}</span>` : ''}
     </div>
   </div>`;
@@ -2220,7 +2313,7 @@ function renderTimeline() {
           ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
           : '';
         const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
-        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" data-id="${task.id}" title="${escapeAttr(tooltip)}">${label}</div>`;
+        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" title="${escapeAttr(tooltip)}">${label}</div>`;
       }).join('');
 
       const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
@@ -2230,7 +2323,16 @@ function renderTimeline() {
         return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${readableStatusColor(meta.color)};"></div>`;
       }).join('');
 
-      innerHtml = bridgeHtml + segHtml;
+      // One invisible handle spans the WHOLE task (ignoring the visual
+      // weekend split) and sits on top of the segments — it's what
+      // actually captures the drag: its middle moves the task, its
+      // edges resize it. Kept separate from the purely-visual segments
+      // above so weekend-splitting doesn't complicate the drag math.
+      const handleLeft = daysBetween(minDate, sched.start) * pxPerDay;
+      const handleWidth = Math.max(pxPerDay * 0.8, (daysBetween(sched.start, sched.finish) + 1) * pxPerDay);
+      const handleHtml = `<div class="timeline-drag-handle" data-id="${task.id}" style="left:${handleLeft}px;width:${handleWidth}px;" title="${escapeAttr(tooltip)}"></div>`;
+
+      innerHtml = bridgeHtml + segHtml + handleHtml;
     }
 
     return `<div class="timeline-row">
@@ -2250,15 +2352,124 @@ function renderTimeline() {
     </div>
     ${rows}
     <div class="timeline-legend">
-      <span><span class="legend-swatch"></span> Explicit deadline</span>
-      <span><span class="legend-swatch dashed"></span> Calculated deadline</span>
+      <span><span class="legend-swatch"></span> Explicit start/end</span>
+      <span><span class="legend-swatch dashed"></span> Calculated start/end</span>
       <span>◆ Milestone (no duration set)</span>
       <span style="color:var(--danger);">Red outline = deadline conflict</span>
     </div>
   </div>`;
 
-  wrap.querySelectorAll('[data-id]').forEach(el => {
+  wrap.querySelectorAll('.timeline-milestone').forEach(el => {
     el.onclick = () => openTaskModal(el.dataset.id);
+  });
+  wrap.querySelectorAll('.timeline-drag-handle').forEach(el => wireTimelineDragHandle(el));
+}
+
+const TIMELINE_RESIZE_ZONE_PX = 8;
+
+function timelineHandleMode(el, clientX) {
+  const rect = el.getBoundingClientRect();
+  const offsetX = clientX - rect.left;
+  if (offsetX <= TIMELINE_RESIZE_ZONE_PX) return 'resize-left';
+  if (offsetX >= rect.width - TIMELINE_RESIZE_ZONE_PX) return 'resize-right';
+  return 'move';
+}
+
+function wireTimelineDragHandle(el) {
+  el.addEventListener('mousemove', (e) => {
+    if (timelineDrag) return; // cursor stays whatever it was set to when the drag started
+    const mode = timelineHandleMode(el, e.clientX);
+    el.style.cursor = mode === 'move' ? 'grab' : 'ew-resize';
+  });
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (isActiveProjectLocked()) return;
+    const taskId = el.dataset.id;
+    const task = getTask(taskId);
+    if (!task) return;
+    const schedule = computeSchedule();
+    const sched = schedule[taskId];
+    if (!sched.start || !sched.finish) return;
+    e.preventDefault();
+    timelineDrag = {
+      taskId,
+      mode: timelineHandleMode(el, e.clientX),
+      startScreenX: e.clientX,
+      origStart: sched.start,
+      origEnd: sched.finish,
+      origDuration: task.duration,
+      lastDeltaDays: 0,
+      moved: false,
+    };
+  });
+}
+
+// Drag state lives at module scope, driven by a single pair of
+// document-level listeners (registered once) — same pattern as the
+// tree box drag. Re-renders the whole timeline on each day-boundary
+// crossed rather than patching DOM in place, since moving/resizing a
+// bar can change how many segments it's visually split into across
+// weekends; the natural throttling (only re-rendering when the pixel
+// delta crosses a full day) keeps this smooth in practice.
+//
+// Whether a plain click should open the task modal is decided directly
+// in the mouseup handler below (not via a separate 'click' listener):
+// since a real drag re-renders the timeline on every step, the handle
+// element mousedown originally fired on is usually gone by the time
+// mouseup happens, so the browser may never synthesize a 'click' event
+// at all — relying on one to reset a "just dragged" flag would leave it
+// stuck forever after the first real drag.
+let timelineDrag = null;
+
+function initTimelineDragHandlers() {
+  document.addEventListener('mousemove', (e) => {
+    if (!timelineDrag) return;
+    const dxScreen = e.clientX - timelineDrag.startScreenX;
+    const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
+    const deltaDays = Math.round(dxScreen / pxPerDay);
+    if (deltaDays === timelineDrag.lastDeltaDays) return;
+    timelineDrag.lastDeltaDays = deltaDays;
+    timelineDrag.moved = true;
+
+    const task = getTask(timelineDrag.taskId);
+    if (!task) return;
+
+    if (timelineDrag.mode === 'move') {
+      let newStart = addDays(timelineDrag.origStart, deltaDays);
+      newStart = snapToNearestBusinessDay(newStart);
+      const dur = timelineDrag.origDuration;
+      task.startDate = newStart;
+      task.endDate = (dur != null && dur > 0) ? addBusinessDays(newStart, dur - 1) : newStart;
+      task.duration = dur;
+    } else if (timelineDrag.mode === 'resize-left') {
+      let newStart = addDays(timelineDrag.origStart, deltaDays);
+      newStart = snapToNearestBusinessDay(newStart);
+      if (newStart > timelineDrag.origEnd) newStart = timelineDrag.origEnd;
+      task.startDate = newStart;
+      task.endDate = timelineDrag.origEnd;
+      task.duration = businessDaysBetweenInclusive(newStart, timelineDrag.origEnd) || 1;
+    } else if (timelineDrag.mode === 'resize-right') {
+      let newEnd = addDays(timelineDrag.origEnd, deltaDays);
+      newEnd = snapToNearestBusinessDay(newEnd);
+      if (newEnd < timelineDrag.origStart) newEnd = timelineDrag.origStart;
+      task.startDate = timelineDrag.origStart;
+      task.endDate = newEnd;
+      task.duration = businessDaysBetweenInclusive(timelineDrag.origStart, newEnd) || 1;
+    }
+    renderTimeline();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!timelineDrag) return;
+    const { taskId, moved } = timelineDrag;
+    timelineDrag = null;
+    if (moved) {
+      saveState();
+      renderAll();
+      toast(`${taskId} rescheduled.`);
+    } else {
+      openTaskModal(taskId);
+    }
   });
 }
 
@@ -2587,14 +2798,14 @@ function loadExampleData() {
       {
         id: 'T-1', title: 'Component design', link: 'https://example.com/design-doc',
         description: 'Define the overall geometry and material for the bracket, including tolerances for the mounting interface.',
-        status: 'working', priority: 'high', deadline: null, duration: 5, parents: [], categories: [catDesign],
+        status: 'working', priority: 'high', startDate: null, endDate: null, duration: 5, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -20), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-2', title: 'Component calculations', link: '',
         description: 'Structural load calculations for the design above, to validate margins before manufacturing.',
-        status: 'released', priority: 'high', deadline: addDays(t, -3), duration: 4, parents: ['T-1'], categories: [catDesign],
+        status: 'released', priority: 'high', startDate: null, endDate: addDays(t, -3), duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [
           { date: addDays(t, -18), note: 'Task created' },
           { date: addDays(t, -3), note: 'Status changed: Working → Released' },
@@ -2603,31 +2814,31 @@ function loadExampleData() {
       },
       {
         id: 'T-3', title: 'Test validation', link: '',
-        status: 'release_process', priority: 'medium', deadline: addDays(t, 4), duration: 3, parents: ['T-2'], categories: [catTesting],
+        status: 'release_process', priority: 'medium', startDate: null, endDate: addDays(t, 4), duration: 3, parents: ['T-2'], categories: [catTesting],
         history: [{ date: addDays(t, -5), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-4', title: 'Housing design', link: '',
-        status: 'working', priority: 'medium', deadline: addDays(t, 10), duration: 6, parents: [], categories: [catDesign],
+        status: 'working', priority: 'medium', startDate: null, endDate: addDays(t, 10), duration: 6, parents: [], categories: [catDesign],
         history: [{ date: addDays(t, -2), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-5', title: 'Final bill of materials', link: '',
-        status: 'working', priority: 'low', deadline: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'], categories: [catPM],
+        status: 'working', priority: 'low', startDate: null, endDate: addDays(t, 16), duration: 2, parents: ['T-3', 'T-4'], categories: [catPM],
         history: [{ date: addDays(t, -1), note: 'Task created' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-6', title: 'Assembly drawings', link: '',
-        status: 'working', priority: 'medium', deadline: null, duration: 4, parents: ['T-1'], categories: [catDesign],
+        status: 'working', priority: 'medium', startDate: null, endDate: null, duration: 4, parents: ['T-1'], categories: [catDesign],
         history: [{ date: addDays(t, -1), note: 'Task created — has no deadline of its own; scheduled forward once T-1 gets a calculated finish date from T-2.' }],
         createdAt: nowISO(),
       },
       {
         id: 'T-7', title: 'Kickoff meeting', link: '',
-        status: 'done', priority: 'low', deadline: addDays(t, -22), duration: 1, parents: [], categories: [catPM],
+        status: 'done', priority: 'low', startDate: null, endDate: addDays(t, -22), duration: 1, parents: [], categories: [catPM],
         history: [
           { date: addDays(t, -22), note: 'Task created' },
           { date: addDays(t, -22), note: 'Status changed: Working → Done' },
@@ -2705,6 +2916,7 @@ function initToolbar() {
     ui.zoomIndex = Math.max(0, ui.zoomIndex - 1);
     renderTimeline();
   };
+  initTimelineDragHandlers();
 }
 
 function initListFilters() {
@@ -2756,6 +2968,8 @@ function initModal() {
       setPriorityToggle(btn.dataset.priority);
     };
   });
+
+  wireDateLinking();
 
   document.getElementById('btnEditCategories').onclick = openCategorySelectModal;
   document.getElementById('categorySelectClose').onclick = () => document.getElementById('categorySelectOverlay').classList.remove('open');
