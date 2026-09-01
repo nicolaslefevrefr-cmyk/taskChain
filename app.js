@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v3.2';
+const APP_VERSION = 'v3.3';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -91,6 +91,11 @@ let ui = {
   statusFilter: 'all',
   categoryFilter: 'all',
   timelineHighlightCategories: new Set(),
+  timelineFreezeOrder: false,
+  timelineFrozenScheduledOrder: null,
+  timelineFrozenUnscheduledOrder: null,
+  timelineBetaFreezeOrder: false,
+  timelineBetaFrozenOrders: {},
   editingTaskId: null,
   draftHistory: [],
   draftCategories: [],
@@ -2255,11 +2260,14 @@ async function handleStatusDrop(taskId, newStatus) {
 // project can have many categories) to pick which ones stay at full
 // opacity — everything else dims, without hiding anything outright.
 function renderTimelineHighlightButton() {
-  const btn = document.getElementById('btnTimelineHighlight');
-  if (!btn) return;
   const count = ui.timelineHighlightCategories.size;
-  btn.textContent = count ? `🎯 Highlighting ${count} categor${count === 1 ? 'y' : 'ies'}` : '🎯 Highlight categories';
-  btn.classList.toggle('active-highlight', count > 0);
+  const label = count ? `🎯 Highlighting ${count} categor${count === 1 ? 'y' : 'ies'}` : '🎯 Highlight categories';
+  ['btnTimelineHighlight', 'btnTimelineHighlightBeta'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.textContent = label;
+    btn.classList.toggle('active-highlight', count > 0);
+  });
 }
 
 function renderTimelineHighlightTree() {
@@ -2301,6 +2309,7 @@ function renderTimelineHighlightTree() {
       else ui.timelineHighlightCategories.delete(cb.value);
       renderTimelineHighlightButton();
       renderTimeline();
+      renderTimelineBeta();
     };
   });
 }
@@ -2312,6 +2321,7 @@ function openTimelineHighlightModal() {
 
 function initTimelineHighlight() {
   document.getElementById('btnTimelineHighlight').onclick = openTimelineHighlightModal;
+  document.getElementById('btnTimelineHighlightBeta').onclick = openTimelineHighlightModal;
   document.getElementById('timelineHighlightClose').onclick = () => document.getElementById('timelineHighlightOverlay').classList.remove('open');
   document.getElementById('timelineHighlightDone').onclick = () => document.getElementById('timelineHighlightOverlay').classList.remove('open');
   document.getElementById('timelineHighlightOverlay').addEventListener('click', e => {
@@ -2322,29 +2332,13 @@ function initTimelineHighlight() {
     renderTimelineHighlightTree();
     renderTimelineHighlightButton();
     renderTimeline();
+    renderTimelineBeta();
   };
 }
 
-function renderTimeline() {
-  // Categories can be deleted elsewhere — drop any stale highlight ids.
-  ui.timelineHighlightCategories.forEach(id => { if (!getCategory(id)) ui.timelineHighlightCategories.delete(id); });
-  renderTimelineHighlightButton();
-
-  const wrap = document.getElementById('timelineWrap');
-
-  if (!state.tasks.length) {
-    wrap.innerHTML = '<div class="timeline-empty">No tasks in this project yet.</div>';
-    return;
-  }
-
-  const schedule = computeSchedule();
-  const allItems = state.tasks.map(t => ({ task: t, sched: schedule[t.id] }));
-  const scheduledItems = allItems.filter(x => x.sched.finish);
-  const unscheduledItems = allItems.filter(x => !x.sched.finish)
-    .sort((a, b) => a.task.title.localeCompare(b.task.title));
-
-  const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
-
+// Shared by the normal Timeline and the beta (grouped-by-category) one,
+// so both use the exact same date window and stay visually aligned.
+function computeTimelineDateRange(scheduledItems) {
   let minDate, maxDate;
   if (scheduledItems.length) {
     minDate = scheduledItems.reduce((m, x) => {
@@ -2355,24 +2349,141 @@ function renderTimeline() {
     minDate = addDays(minDate, -3);
     maxDate = addDays(maxDate, 5);
   } else {
-    // Nothing scheduled at all yet — show a plain default window
-    // (centered on today) so there's still a grid to drag across.
     minDate = addDays(todayStr(), -7);
     maxDate = addDays(todayStr(), 30);
   }
-
-  // Align the visible range to a Monday so week separators land cleanly
   const dow = dayOfWeek(minDate);
   const backToMonday = dow === 0 ? 6 : dow - 1;
   minDate = addDays(minDate, -backToMonday);
-
   const totalDays = Math.max(7, daysBetween(minDate, maxDate));
+  return { minDate, totalDays };
+}
+
+// Keeps a stable row order while frozen, instead of continuously
+// re-sorting by date (which is what made a dragged bar jump around
+// vertically). While unfrozen, the snapshot is kept live in sync with
+// the natural order, so turning freezing on always captures whatever's
+// currently showing. Additions/removals are reconciled even while
+// frozen — new tasks are appended, deleted ones just drop out.
+// `storage` is a plain object and `key` identifies this particular
+// section within it, so the same helper works for the normal Timeline
+// (two sections: scheduled/unscheduled) and the beta one (one pair of
+// sections per category group).
+function applyFreezeOrder(naturalItems, freezeOn, storage, key) {
+  const naturalIds = naturalItems.map(x => x.task.id);
+  if (!freezeOn) {
+    storage[key] = naturalIds;
+    return naturalItems;
+  }
+  if (!storage[key]) storage[key] = naturalIds;
+  const naturalSet = new Set(naturalIds);
+  const frozen = storage[key].filter(id => naturalSet.has(id));
+  const frozenSet = new Set(frozen);
+  const combined = frozen.concat(naturalIds.filter(id => !frozenSet.has(id)));
+  storage[key] = combined;
+  const byId = new Map(naturalItems.map(x => [x.task.id, x]));
+  return combined.map(id => byId.get(id));
+}
+
+// One scheduled task's row: status-colored bar (or diamond milestone),
+// split across weekends, with an invisible drag handle on top for
+// move/resize. extraLabelHtml lets the beta view prepend category tags.
+function buildTimelineScheduledRowHtml(task, sched, minDate, pxPerDay, totalWidth, dimmed, extraLabelHtml) {
+  const meta = getStatusMeta(task.status);
+  const isMilestone = !(task.duration != null && task.duration > 0);
+  const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
+  let innerHtml;
+
+  if (isMilestone) {
+    innerHtml = `<div class="timeline-milestone" style="left:${left}px;background-color:${meta.color};" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
+  } else {
+    const derived = sched.finishSource === 'derived';
+    const runs = computeBusinessRuns(sched.start, sched.finish);
+    const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
+    const colorStyle = derived
+      ? `color:${readableStatusColor(meta.color)};`
+      : `background-color:${meta.color};color:${contrastTextFor(meta.color)};`;
+    const cls = ['timeline-bar', derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
+
+    const segHtml = runs.map(([runStart, runEnd], i) => {
+      const segLeft = daysBetween(minDate, runStart) * pxPerDay + 1;
+      const segWidth = Math.max(pxPerDay * 0.7, (daysBetween(runStart, runEnd) + 1) * pxPerDay - 3);
+      const compact = segWidth < 74;
+      const hideText = segWidth < 26;
+      const label = (i === 0 && !hideText)
+        ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
+        : '';
+      const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
+      return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" title="${escapeAttr(tooltip)}">${label}</div>`;
+    }).join('');
+
+    const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
+      const nextStart = runs[i + 1][0];
+      const bLeft = daysBetween(minDate, runEnd) * pxPerDay + pxPerDay - 1;
+      const bWidth = daysBetween(runEnd, nextStart) * pxPerDay - pxPerDay + 2;
+      return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${readableStatusColor(meta.color)};"></div>`;
+    }).join('');
+
+    const handleLeft = daysBetween(minDate, sched.start) * pxPerDay;
+    const handleWidth = Math.max(pxPerDay * 0.8, (daysBetween(sched.start, sched.finish) + 1) * pxPerDay);
+    const handleHtml = `<div class="timeline-drag-handle" data-id="${task.id}" style="left:${handleLeft}px;width:${handleWidth}px;" title="${escapeAttr(tooltip)}"></div>`;
+
+    innerHtml = bridgeHtml + segHtml + handleHtml;
+  }
+
+  return `<div class="timeline-row${dimmed ? ' timeline-row-dimmed' : ''}">
+    <div class="timeline-label">
+      ${extraLabelHtml || ''}
+      <span class="id-tag">${task.id}</span>
+      <span>${escapeHtml(task.title)}</span>
+    </div>
+    <div class="timeline-track" style="width:${totalWidth}px;">${innerHtml}</div>
+  </div>`;
+}
+
+// One unscheduled task's row: empty track, wired for drag-to-create.
+function buildTimelineUnscheduledRowHtml(task, totalWidth, dimmed, extraLabelHtml) {
+  return `<div class="timeline-row${dimmed ? ' timeline-row-dimmed' : ''}">
+    <div class="timeline-label">
+      ${extraLabelHtml || ''}
+      <span class="id-tag">${task.id}</span>
+      <span>${escapeHtml(task.title)}</span>
+    </div>
+    <div class="timeline-track timeline-track-empty" style="width:${totalWidth}px;" data-empty-id="${task.id}">
+      <span class="timeline-empty-hint">Drag to set start/end</span>
+    </div>
+  </div>`;
+}
+
+function renderTimeline() {
+  // Categories can be deleted elsewhere — drop any stale highlight ids.
+  ui.timelineHighlightCategories.forEach(id => { if (!getCategory(id)) ui.timelineHighlightCategories.delete(id); });
+  renderTimelineHighlightButton();
+  document.getElementById('chkFreezeOrder').checked = ui.timelineFreezeOrder;
+
+  const wrap = document.getElementById('timelineWrap');
+
+  if (!state.tasks.length) {
+    wrap.innerHTML = '<div class="timeline-empty">No tasks in this project yet.</div>';
+    return;
+  }
+
+  const schedule = computeSchedule();
+  const allItems = state.tasks.map(t => ({ task: t, sched: schedule[t.id] }));
+  let scheduledItems = allItems.filter(x => x.sched.finish);
+  let unscheduledItems = allItems.filter(x => !x.sched.finish)
+    .sort((a, b) => a.task.title.localeCompare(b.task.title));
+  scheduledItems.sort((a, b) => (a.sched.start || a.sched.finish).localeCompare(b.sched.start || b.sched.finish));
+
+  scheduledItems = applyFreezeOrder(scheduledItems, ui.timelineFreezeOrder, ui, 'timelineFrozenScheduledOrder');
+  unscheduledItems = applyFreezeOrder(unscheduledItems, ui.timelineFreezeOrder, ui, 'timelineFrozenUnscheduledOrder');
+
+  const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
+  const { minDate, totalDays } = computeTimelineDateRange(scheduledItems);
   const totalWidth = totalDays * pxPerDay;
   // Referenced by the drag-to-create handlers (registered once, not
   // per-render), so they always know the CURRENT grid's origin/scale.
   timelineMinDate = minDate;
-
-  scheduledItems.sort((a, b) => (a.sched.start || a.sched.finish).localeCompare(b.sched.start || b.sched.finish));
 
   const rowCount = scheduledItems.length + unscheduledItems.length + (scheduledItems.length && unscheduledItems.length ? 1 : 0);
   const gridOverlay = buildGridOverlay(minDate, totalDays, pxPerDay, rowCount);
@@ -2390,80 +2501,17 @@ function renderTimeline() {
   }
   const isDimmed = (task) => highlightAllowed && !(task.categories || []).some(cid => highlightAllowed.has(cid));
 
-  const scheduledRows = scheduledItems.map(({ task, sched }) => {
-    const meta = getStatusMeta(task.status);
-    const isMilestone = !(task.duration != null && task.duration > 0);
-    const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
-    let innerHtml;
-
-    if (isMilestone) {
-      innerHtml = `<div class="timeline-milestone" style="left:${left}px;background-color:${meta.color};" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
-    } else {
-      const derived = sched.finishSource === 'derived';
-      const runs = computeBusinessRuns(sched.start, sched.finish);
-      const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
-      const colorStyle = derived
-        ? `color:${readableStatusColor(meta.color)};`
-        : `background-color:${meta.color};color:${contrastTextFor(meta.color)};`;
-      const cls = ['timeline-bar', derived ? 'derived' : '', sched.conflict ? 'conflict' : ''];
-
-      const segHtml = runs.map(([runStart, runEnd], i) => {
-        const segLeft = daysBetween(minDate, runStart) * pxPerDay + 1;
-        const segWidth = Math.max(pxPerDay * 0.7, (daysBetween(runStart, runEnd) + 1) * pxPerDay - 3);
-        const compact = segWidth < 74;
-        const hideText = segWidth < 26;
-        // Only the first segment carries the label, and only shows the
-        // full date range when the whole bar is a single run.
-        const label = (i === 0 && !hideText)
-          ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
-          : '';
-        const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
-        return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" title="${escapeAttr(tooltip)}">${label}</div>`;
-      }).join('');
-
-      const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
-        const nextStart = runs[i + 1][0];
-        const bLeft = daysBetween(minDate, runEnd) * pxPerDay + pxPerDay - 1;
-        const bWidth = daysBetween(runEnd, nextStart) * pxPerDay - pxPerDay + 2;
-        return `<div class="timeline-bar-bridge" style="left:${bLeft}px;width:${Math.max(0, bWidth)}px;background-color:${readableStatusColor(meta.color)};"></div>`;
-      }).join('');
-
-      // One invisible handle spans the WHOLE task (ignoring the visual
-      // weekend split) and sits on top of the segments — it's what
-      // actually captures the drag: its middle moves the task, its
-      // edges resize it. Kept separate from the purely-visual segments
-      // above so weekend-splitting doesn't complicate the drag math.
-      const handleLeft = daysBetween(minDate, sched.start) * pxPerDay;
-      const handleWidth = Math.max(pxPerDay * 0.8, (daysBetween(sched.start, sched.finish) + 1) * pxPerDay);
-      const handleHtml = `<div class="timeline-drag-handle" data-id="${task.id}" style="left:${handleLeft}px;width:${handleWidth}px;" title="${escapeAttr(tooltip)}"></div>`;
-
-      innerHtml = bridgeHtml + segHtml + handleHtml;
-    }
-
-    return `<div class="timeline-row${isDimmed(task) ? ' timeline-row-dimmed' : ''}">
-      <div class="timeline-label">
-        <span class="id-tag">${task.id}</span>
-        <span>${escapeHtml(task.title)}</span>
-      </div>
-      <div class="timeline-track" style="width:${totalWidth}px;">${innerHtml}</div>
-    </div>`;
-  }).join('');
+  const scheduledRows = scheduledItems
+    .map(({ task, sched }) => buildTimelineScheduledRowHtml(task, sched, minDate, pxPerDay, totalWidth, isDimmed(task)))
+    .join('');
 
   const dividerHtml = (scheduledItems.length && unscheduledItems.length)
     ? `<div class="timeline-section-divider">Not yet scheduled — drag across a row below to set its dates</div>`
     : '';
 
-  const unscheduledRows = unscheduledItems.map(({ task }) => {
-    return `<div class="timeline-row${isDimmed(task) ? ' timeline-row-dimmed' : ''}">
-      <div class="timeline-label">
-        <span class="id-tag">${task.id}</span>
-        <span>${escapeHtml(task.title)}</span>
-      </div>
-      <div class="timeline-track timeline-track-empty" style="width:${totalWidth}px;" data-empty-id="${task.id}">
-        <span class="timeline-empty-hint">Drag to set start/end</span>
-      </div>
-    </div>`;
-  }).join('');
+  const unscheduledRows = unscheduledItems
+    .map(({ task }) => buildTimelineUnscheduledRowHtml(task, totalWidth, isDimmed(task)))
+    .join('');
 
   wrap.innerHTML = `<div class="timeline-inner">
     ${gridOverlay}
@@ -2487,6 +2535,126 @@ function renderTimeline() {
   });
   wrap.querySelectorAll('.timeline-drag-handle').forEach(el => wireTimelineDragHandle(el));
   wrap.querySelectorAll('.timeline-track-empty').forEach(el => wireTimelineEmptyTrack(el));
+}
+
+// Beta: the same timeline, grouped under a collapsible category tree
+// instead of one flat list — a task with several categories appears
+// once under each. Shares zoom, highlight, and the schedule engine
+// with the normal Timeline tab; freeze-order is tracked separately
+// since "stable order" means something different per category group
+// here rather than per scheduled/unscheduled split.
+function renderTimelineBeta() {
+  ui.timelineHighlightCategories.forEach(id => { if (!getCategory(id)) ui.timelineHighlightCategories.delete(id); });
+  renderTimelineHighlightButton();
+  const freezeCb = document.getElementById('chkFreezeOrderBeta');
+  if (freezeCb) freezeCb.checked = ui.timelineBetaFreezeOrder;
+
+  const wrap = document.getElementById('timelineBetaWrap');
+  if (!wrap) return; // tab not in the DOM (shouldn't happen, but keep renderAll() safe)
+
+  if (!state.tasks.length) {
+    wrap.innerHTML = '<div class="timeline-empty">No tasks in this project yet.</div>';
+    return;
+  }
+
+  const schedule = computeSchedule();
+  const allItems = state.tasks.map(t => ({ task: t, sched: schedule[t.id] }));
+  const allScheduled = allItems.filter(x => x.sched.finish);
+
+  const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
+  const { minDate, totalDays } = computeTimelineDateRange(allScheduled);
+  const totalWidth = totalDays * pxPerDay;
+  timelineMinDate = minDate;
+
+  let highlightAllowed = null;
+  if (ui.timelineHighlightCategories.size) {
+    highlightAllowed = new Set();
+    ui.timelineHighlightCategories.forEach(cid => {
+      highlightAllowed.add(cid);
+      getCategoryDescendantIds(cid).forEach(id => highlightAllowed.add(id));
+    });
+  }
+  const isDimmed = (task) => highlightAllowed && !(task.categories || []).some(cid => highlightAllowed.has(cid));
+
+  let rowCount = 0;
+
+  function renderGroupRows(tasksInGroup, groupKeyPrefix) {
+    let items = tasksInGroup.map(t => ({ task: t, sched: schedule[t.id] }));
+    let scheduledG = items.filter(x => x.sched.finish)
+      .sort((a, b) => (a.sched.start || a.sched.finish).localeCompare(b.sched.start || b.sched.finish));
+    let unscheduledG = items.filter(x => !x.sched.finish)
+      .sort((a, b) => a.task.title.localeCompare(b.task.title));
+    scheduledG = applyFreezeOrder(scheduledG, ui.timelineBetaFreezeOrder, ui.timelineBetaFrozenOrders, groupKeyPrefix + ':sched');
+    unscheduledG = applyFreezeOrder(unscheduledG, ui.timelineBetaFreezeOrder, ui.timelineBetaFrozenOrders, groupKeyPrefix + ':unsched');
+    rowCount += scheduledG.length + unscheduledG.length;
+    const schedHtml = scheduledG.map(({ task, sched }) => buildTimelineScheduledRowHtml(task, sched, minDate, pxPerDay, totalWidth, isDimmed(task))).join('');
+    const unschedHtml = unscheduledG.map(({ task }) => buildTimelineUnscheduledRowHtml(task, totalWidth, isDimmed(task))).join('');
+    return schedHtml + unschedHtml;
+  }
+
+  function renderCategorySection(cat, depth) {
+    const tasksInCat = state.tasks.filter(t => (t.categories || []).includes(cat.id));
+    const children = getCategoryChildren(cat.id);
+    if (!categoryHasTasks(cat, state.tasks)) return ''; // nothing anywhere in this branch — skip entirely
+
+    const collapsed = ui.collapsedCategories.has(cat.id);
+    rowCount++; // header row
+    let html = `<div class="timeline-section-divider timeline-cat-header" data-cat-toggle="${cat.id}" style="padding-left:${14 + depth * 18}px;">
+      <span class="cat-toggle-inline">${collapsed ? '▶' : '▼'}</span> ${escapeHtml(cat.name)}
+      <span class="timeline-cat-count">${tasksInCat.length}</span>
+    </div>`;
+
+    if (!collapsed) {
+      html += renderGroupRows(tasksInCat, 'cat:' + cat.id);
+      children.forEach(c => { html += renderCategorySection(c, depth + 1); });
+    }
+    return html;
+  }
+
+  let sectionsHtml = getCategoryChildren(null).map(cat => renderCategorySection(cat, 0)).join('');
+
+  const uncategorizedTasks = state.tasks.filter(t => !(t.categories || []).length);
+  if (uncategorizedTasks.length) {
+    rowCount++;
+    sectionsHtml += `<div class="timeline-section-divider">Uncategorized <span class="timeline-cat-count">${uncategorizedTasks.length}</span></div>`;
+    sectionsHtml += renderGroupRows(uncategorizedTasks, 'uncategorized');
+  }
+
+  if (!sectionsHtml) {
+    wrap.innerHTML = '<div class="timeline-empty">No tasks in this project yet.</div>';
+    return;
+  }
+
+  const gridOverlay = buildGridOverlay(minDate, totalDays, pxPerDay, rowCount);
+  const ruler = buildRuler(minDate, totalDays, pxPerDay);
+
+  wrap.innerHTML = `<div class="timeline-inner">
+    ${gridOverlay}
+    <div class="timeline-ruler">
+      <div class="timeline-label">Task</div>
+      <div class="timeline-ruler-track" style="width:${totalWidth}px;">${ruler}</div>
+    </div>
+    ${sectionsHtml}
+    <div class="timeline-legend">
+      <span><span class="legend-swatch"></span> Explicit start/end</span>
+      <span><span class="legend-swatch dashed"></span> Calculated start/end</span>
+      <span>◆ Milestone (no duration set)</span>
+      <span style="color:var(--danger);">Red outline = deadline conflict</span>
+    </div>
+  </div>`;
+
+  wrap.querySelectorAll('.timeline-milestone').forEach(el => {
+    el.onclick = () => openTaskModal(el.dataset.id);
+  });
+  wrap.querySelectorAll('.timeline-drag-handle').forEach(el => wireTimelineDragHandle(el));
+  wrap.querySelectorAll('.timeline-track-empty').forEach(el => wireTimelineEmptyTrack(el));
+  wrap.querySelectorAll('[data-cat-toggle]').forEach(el => {
+    el.onclick = () => {
+      const id = el.dataset.catToggle;
+      if (ui.collapsedCategories.has(id)) ui.collapsedCategories.delete(id); else ui.collapsedCategories.add(id);
+      renderTimelineBeta();
+    };
+  });
 }
 
 const TIMELINE_RESIZE_ZONE_PX = 8;
@@ -2624,6 +2792,7 @@ function initTimelineDragHandlers() {
       task.endDate = end;
       task.duration = businessDaysBetweenInclusive(start, end) || 1;
       renderTimeline();
+      renderTimelineBeta();
       return;
     }
 
@@ -2665,6 +2834,7 @@ function initTimelineDragHandlers() {
     cascadeContinuousDescendants(timelineDrag.taskId, finishDelta, timelineDrag.originalSchedule, new Set([timelineDrag.taskId]));
 
     renderTimeline();
+    renderTimelineBeta();
   });
 
   document.addEventListener('mouseup', () => {
@@ -2732,6 +2902,7 @@ function renderAll() {
   renderTree();
   renderKanban();
   renderTimeline();
+  renderTimelineBeta();
   renderCategoryTab();
   renderProjectSettingsTab();
   renderSidebar();
@@ -3132,10 +3303,30 @@ function initToolbar() {
   document.getElementById('btnZoomIn').onclick = () => {
     ui.zoomIndex = Math.min(ZOOM_LEVELS.length - 1, ui.zoomIndex + 1);
     renderTimeline();
+    renderTimelineBeta();
   };
   document.getElementById('btnZoomOut').onclick = () => {
     ui.zoomIndex = Math.max(0, ui.zoomIndex - 1);
     renderTimeline();
+    renderTimelineBeta();
+  };
+  document.getElementById('btnZoomInBeta').onclick = () => {
+    ui.zoomIndex = Math.min(ZOOM_LEVELS.length - 1, ui.zoomIndex + 1);
+    renderTimeline();
+    renderTimelineBeta();
+  };
+  document.getElementById('btnZoomOutBeta').onclick = () => {
+    ui.zoomIndex = Math.max(0, ui.zoomIndex - 1);
+    renderTimeline();
+    renderTimelineBeta();
+  };
+  document.getElementById('chkFreezeOrder').onchange = (e) => {
+    ui.timelineFreezeOrder = e.target.checked;
+    renderTimeline();
+  };
+  document.getElementById('chkFreezeOrderBeta').onchange = (e) => {
+    ui.timelineBetaFreezeOrder = e.target.checked;
+    renderTimelineBeta();
   };
   initTimelineDragHandlers();
 }

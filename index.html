@@ -61,6 +61,7 @@
         <button class="tab-btn" data-tab="tree">Tree</button>
         <button class="tab-btn" data-tab="gantt">Gantt</button>
         <button class="tab-btn" data-tab="timeline">Timeline</button>
+        <button class="tab-btn" data-tab="timeline-beta">Timeline (beta)</button>
         <button class="tab-btn" data-tab="category">Category</button>
         <button class="tab-btn tab-btn-settings" data-tab="settings">Settings</button>
       </nav>
@@ -136,12 +137,36 @@
             <p class="panel-hint">Solid bars use an explicit start/end. Dashed bars are dates <strong>calculated</strong> from linked tasks. Drag the middle of a bar to move it, or its left/right edge to resize it. Tasks with no dates yet are listed at the bottom — drag across their row to set a start/end directly. Weekends are excluded from all duration math.</p>
           </div>
           <div class="btn-group">
+            <label class="freeze-order-toggle" title="Keep rows in their current position instead of re-sorting by date on every change">
+              <input type="checkbox" id="chkFreezeOrder"> Freeze order
+            </label>
             <button class="btn btn-ghost btn-sm" id="btnTimelineHighlight">🎯 Highlight categories</button>
             <button class="btn btn-ghost btn-sm" id="btnZoomOut" title="Zoom out">−</button>
             <button class="btn btn-ghost btn-sm" id="btnZoomIn" title="Zoom in">+</button>
           </div>
         </div>
         <div class="timeline-wrap" id="timelineWrap"></div>
+      </div>
+    </section>
+
+    <!-- ===================== TAB: TIMELINE BETA (grouped by category) ===================== -->
+    <section class="tab-panel" id="panel-timeline-beta">
+      <div class="timeline-section">
+        <div class="panel-toolbar">
+          <div>
+            <h3 class="section-title">Timeline <span class="beta-tag">BETA</span></h3>
+            <p class="panel-hint">Same timeline, grouped by category — a task with several categories appears once under each. Click a category header to collapse it. Everything else works the same as the regular Timeline tab (drag to move/resize/create, same zoom and highlight). Uncategorized tasks are listed last.</p>
+          </div>
+          <div class="btn-group">
+            <label class="freeze-order-toggle" title="Keep rows in their current position instead of re-sorting by date on every change">
+              <input type="checkbox" id="chkFreezeOrderBeta"> Freeze order
+            </label>
+            <button class="btn btn-ghost btn-sm" id="btnTimelineHighlightBeta">🎯 Highlight categories</button>
+            <button class="btn btn-ghost btn-sm" id="btnZoomOutBeta" title="Zoom out">−</button>
+            <button class="btn btn-ghost btn-sm" id="btnZoomInBeta" title="Zoom in">+</button>
+          </div>
+        </div>
+        <div class="timeline-wrap" id="timelineBetaWrap"></div>
       </div>
     </section>
 
