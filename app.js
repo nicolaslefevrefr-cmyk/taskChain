@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v3.1';
+const APP_VERSION = 'v3.2';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -2251,66 +2251,115 @@ async function handleStatusDrop(taskId, newStatus) {
 /* =========================================================
    RENDER: TIMELINE (schedule-aware Gantt, weekly grid, zoomable)
    ========================================================= */
-// Chip row above the timeline: click a category to highlight tasks
-// tagged with it (or one of its subcategories) — everything else dims,
-// without hiding anything outright. Multi-select: several categories
-// can be highlighted at once.
-function renderTimelineCategoryHighlight() {
-  const wrap = document.getElementById('timelineCategoryHighlight');
-  if (!getCategories().length) { wrap.innerHTML = ''; return; }
+// Button above the timeline opens a checkbox tree (in a modal, since a
+// project can have many categories) to pick which ones stay at full
+// opacity — everything else dims, without hiding anything outright.
+function renderTimelineHighlightButton() {
+  const btn = document.getElementById('btnTimelineHighlight');
+  if (!btn) return;
+  const count = ui.timelineHighlightCategories.size;
+  btn.textContent = count ? `🎯 Highlighting ${count} categor${count === 1 ? 'y' : 'ies'}` : '🎯 Highlight categories';
+  btn.classList.toggle('active-highlight', count > 0);
+}
 
-  let html = '';
-  function addChips(parentId, depth) {
-    getCategoryChildren(parentId).forEach(cat => {
-      const prefix = depth > 0 ? '\u2003'.repeat(depth) + '↳ ' : '';
-      const active = ui.timelineHighlightCategories.has(cat.id);
-      html += `<button type="button" class="chip${active ? ' active' : ''}" data-cat="${cat.id}">${prefix}${escapeHtml(cat.name)}</button>`;
-      addChips(cat.id, depth + 1);
-    });
+function renderTimelineHighlightTree() {
+  const wrap = document.getElementById('timelineHighlightTree');
+  if (!getCategories().length) {
+    wrap.innerHTML = '<div class="parent-picker-empty">No categories yet — create some in the Category tab.</div>';
+    return;
   }
-  addChips(null, 0);
-  if (ui.timelineHighlightCategories.size) {
-    html += `<button type="button" class="chip chip-clear-highlight" id="btnClearTimelineHighlight">Clear highlight</button>`;
+  function renderNode(cat) {
+    const children = getCategoryChildren(cat.id);
+    const collapsed = ui.collapsedCategories.has(cat.id);
+    const checked = ui.timelineHighlightCategories.has(cat.id) ? 'checked' : '';
+    let html = `<div class="cat-node">
+      <div class="cat-row">
+        <button type="button" class="cat-toggle${children.length ? '' : ' leaf'}" data-toggle="${cat.id}">${collapsed ? '▶' : '▼'}</button>
+        <label class="cat-select-card">
+          <input type="checkbox" value="${cat.id}" ${checked}>
+          <span class="cat-name">${escapeHtml(cat.name)}</span>
+        </label>
+      </div>`;
+    if (children.length && !collapsed) {
+      html += `<div class="cat-children">${children.map(renderNode).join('')}</div>`;
+    }
+    html += `</div>`;
+    return html;
   }
-  wrap.innerHTML = html;
+  wrap.innerHTML = `<div class="cat-root-list">${getCategoryChildren(null).map(renderNode).join('')}</div>`;
 
-  wrap.querySelectorAll('[data-cat]').forEach(chip => {
-    chip.onclick = () => {
-      const id = chip.dataset.cat;
-      if (ui.timelineHighlightCategories.has(id)) ui.timelineHighlightCategories.delete(id);
-      else ui.timelineHighlightCategories.add(id);
+  wrap.querySelectorAll('[data-toggle]').forEach(btn => {
+    btn.onclick = () => {
+      const id = btn.dataset.toggle;
+      if (ui.collapsedCategories.has(id)) ui.collapsedCategories.delete(id); else ui.collapsedCategories.add(id);
+      renderTimelineHighlightTree();
+    };
+  });
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.onchange = () => {
+      if (cb.checked) ui.timelineHighlightCategories.add(cb.value);
+      else ui.timelineHighlightCategories.delete(cb.value);
+      renderTimelineHighlightButton();
       renderTimeline();
     };
   });
-  const clearBtn = document.getElementById('btnClearTimelineHighlight');
-  if (clearBtn) clearBtn.onclick = () => {
+}
+
+function openTimelineHighlightModal() {
+  renderTimelineHighlightTree();
+  document.getElementById('timelineHighlightOverlay').classList.add('open');
+}
+
+function initTimelineHighlight() {
+  document.getElementById('btnTimelineHighlight').onclick = openTimelineHighlightModal;
+  document.getElementById('timelineHighlightClose').onclick = () => document.getElementById('timelineHighlightOverlay').classList.remove('open');
+  document.getElementById('timelineHighlightDone').onclick = () => document.getElementById('timelineHighlightOverlay').classList.remove('open');
+  document.getElementById('timelineHighlightOverlay').addEventListener('click', e => {
+    if (e.target.id === 'timelineHighlightOverlay') e.target.classList.remove('open');
+  });
+  document.getElementById('btnClearTimelineHighlightModal').onclick = () => {
     ui.timelineHighlightCategories.clear();
+    renderTimelineHighlightTree();
+    renderTimelineHighlightButton();
     renderTimeline();
   };
 }
 
 function renderTimeline() {
-  renderTimelineCategoryHighlight();
-  const wrap = document.getElementById('timelineWrap');
-  const schedule = computeSchedule();
-  const items = state.tasks
-    .map(t => ({ task: t, sched: schedule[t.id] }))
-    .filter(x => x.sched.finish);
+  // Categories can be deleted elsewhere — drop any stale highlight ids.
+  ui.timelineHighlightCategories.forEach(id => { if (!getCategory(id)) ui.timelineHighlightCategories.delete(id); });
+  renderTimelineHighlightButton();
 
-  if (!items.length) {
-    wrap.innerHTML = '<div class="timeline-empty">Add a start or end date (ideally with a duration) to at least one task in a chain. Linked tasks without their own dates will then get a calculated date automatically.</div>';
+  const wrap = document.getElementById('timelineWrap');
+
+  if (!state.tasks.length) {
+    wrap.innerHTML = '<div class="timeline-empty">No tasks in this project yet.</div>';
     return;
   }
 
+  const schedule = computeSchedule();
+  const allItems = state.tasks.map(t => ({ task: t, sched: schedule[t.id] }));
+  const scheduledItems = allItems.filter(x => x.sched.finish);
+  const unscheduledItems = allItems.filter(x => !x.sched.finish)
+    .sort((a, b) => a.task.title.localeCompare(b.task.title));
+
   const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
 
-  let minDate = items.reduce((m, x) => {
-    const anchor = x.sched.start || x.sched.finish;
-    return anchor < m ? anchor : m;
-  }, items[0].sched.start || items[0].sched.finish);
-  let maxDate = items.reduce((m, x) => x.sched.finish > m ? x.sched.finish : m, items[0].sched.finish);
-  minDate = addDays(minDate, -3);
-  maxDate = addDays(maxDate, 5);
+  let minDate, maxDate;
+  if (scheduledItems.length) {
+    minDate = scheduledItems.reduce((m, x) => {
+      const anchor = x.sched.start || x.sched.finish;
+      return anchor < m ? anchor : m;
+    }, scheduledItems[0].sched.start || scheduledItems[0].sched.finish);
+    maxDate = scheduledItems.reduce((m, x) => x.sched.finish > m ? x.sched.finish : m, scheduledItems[0].sched.finish);
+    minDate = addDays(minDate, -3);
+    maxDate = addDays(maxDate, 5);
+  } else {
+    // Nothing scheduled at all yet — show a plain default window
+    // (centered on today) so there's still a grid to drag across.
+    minDate = addDays(todayStr(), -7);
+    maxDate = addDays(todayStr(), 30);
+  }
 
   // Align the visible range to a Monday so week separators land cleanly
   const dow = dayOfWeek(minDate);
@@ -2319,14 +2368,18 @@ function renderTimeline() {
 
   const totalDays = Math.max(7, daysBetween(minDate, maxDate));
   const totalWidth = totalDays * pxPerDay;
+  // Referenced by the drag-to-create handlers (registered once, not
+  // per-render), so they always know the CURRENT grid's origin/scale.
+  timelineMinDate = minDate;
 
-  items.sort((a, b) => (a.sched.start || a.sched.finish).localeCompare(b.sched.start || b.sched.finish));
+  scheduledItems.sort((a, b) => (a.sched.start || a.sched.finish).localeCompare(b.sched.start || b.sched.finish));
 
-  const gridOverlay = buildGridOverlay(minDate, totalDays, pxPerDay, items.length);
+  const rowCount = scheduledItems.length + unscheduledItems.length + (scheduledItems.length && unscheduledItems.length ? 1 : 0);
+  const gridOverlay = buildGridOverlay(minDate, totalDays, pxPerDay, rowCount);
   const ruler = buildRuler(minDate, totalDays, pxPerDay);
 
-  // If any category chips are highlighted, everything NOT tagged with
-  // one of them (or one of their subcategories) gets visually dimmed.
+  // If any categories are highlighted, everything NOT tagged with one
+  // of them (or one of their subcategories) gets visually dimmed.
   let highlightAllowed = null;
   if (ui.timelineHighlightCategories.size) {
     highlightAllowed = new Set();
@@ -2337,7 +2390,7 @@ function renderTimeline() {
   }
   const isDimmed = (task) => highlightAllowed && !(task.categories || []).some(cid => highlightAllowed.has(cid));
 
-  const rows = items.map(({ task, sched }) => {
+  const scheduledRows = scheduledItems.map(({ task, sched }) => {
     const meta = getStatusMeta(task.status);
     const isMilestone = !(task.duration != null && task.duration > 0);
     const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
@@ -2396,13 +2449,31 @@ function renderTimeline() {
     </div>`;
   }).join('');
 
+  const dividerHtml = (scheduledItems.length && unscheduledItems.length)
+    ? `<div class="timeline-section-divider">Not yet scheduled — drag across a row below to set its dates</div>`
+    : '';
+
+  const unscheduledRows = unscheduledItems.map(({ task }) => {
+    return `<div class="timeline-row${isDimmed(task) ? ' timeline-row-dimmed' : ''}">
+      <div class="timeline-label">
+        <span class="id-tag">${task.id}</span>
+        <span>${escapeHtml(task.title)}</span>
+      </div>
+      <div class="timeline-track timeline-track-empty" style="width:${totalWidth}px;" data-empty-id="${task.id}">
+        <span class="timeline-empty-hint">Drag to set start/end</span>
+      </div>
+    </div>`;
+  }).join('');
+
   wrap.innerHTML = `<div class="timeline-inner">
     ${gridOverlay}
     <div class="timeline-ruler">
       <div class="timeline-label">Task</div>
       <div class="timeline-ruler-track" style="width:${totalWidth}px;">${ruler}</div>
     </div>
-    ${rows}
+    ${scheduledRows}
+    ${dividerHtml}
+    ${unscheduledRows}
     <div class="timeline-legend">
       <span><span class="legend-swatch"></span> Explicit start/end</span>
       <span><span class="legend-swatch dashed"></span> Calculated start/end</span>
@@ -2415,6 +2486,7 @@ function renderTimeline() {
     el.onclick = () => openTaskModal(el.dataset.id);
   });
   wrap.querySelectorAll('.timeline-drag-handle').forEach(el => wireTimelineDragHandle(el));
+  wrap.querySelectorAll('.timeline-track-empty').forEach(el => wireTimelineEmptyTrack(el));
 }
 
 const TIMELINE_RESIZE_ZONE_PX = 8;
@@ -2457,6 +2529,30 @@ function wireTimelineDragHandle(el) {
   });
 }
 
+// An unscheduled task's row still shows up, with an empty track — drag
+// across it to set that task's start/end directly instead of typing
+// dates by hand. A plain click (no drag) opens the edit window instead.
+function wireTimelineEmptyTrack(el) {
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (isActiveProjectLocked()) return;
+    if (!timelineMinDate) return;
+    const taskId = el.dataset.emptyId;
+    if (!getTask(taskId)) return;
+    e.preventDefault();
+    const rect = el.getBoundingClientRect();
+    const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
+    const dayIndex = Math.round((e.clientX - rect.left) / pxPerDay);
+    timelineCreateDrag = {
+      taskId,
+      anchorDate: snapToNearestBusinessDay(addDays(timelineMinDate, dayIndex)),
+      startScreenX: e.clientX,
+      lastDeltaDays: 0,
+      moved: false,
+    };
+  });
+}
+
 // Drag state lives at module scope, driven by a single pair of
 // document-level listeners (registered once) — same pattern as the
 // tree box drag. Re-renders the whole timeline on each day-boundary
@@ -2473,6 +2569,8 @@ function wireTimelineDragHandle(el) {
 // at all — relying on one to reset a "just dragged" flag would leave it
 // stuck forever after the first real drag.
 let timelineDrag = null;
+let timelineCreateDrag = null;
+let timelineMinDate = null; // current grid origin, refreshed on every renderTimeline() call
 
 // After a drag changes the dragged task's FINISH date (a move shifts
 // both start and finish together; resize-right changes only finish;
@@ -2509,6 +2607,26 @@ function cascadeContinuousDescendants(taskId, finishDeltaDays, originalSchedule,
 
 function initTimelineDragHandlers() {
   document.addEventListener('mousemove', (e) => {
+    if (timelineCreateDrag) {
+      const dxScreen = e.clientX - timelineCreateDrag.startScreenX;
+      const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
+      const deltaDays = Math.round(dxScreen / pxPerDay);
+      if (deltaDays === timelineCreateDrag.lastDeltaDays) return;
+      timelineCreateDrag.lastDeltaDays = deltaDays;
+      timelineCreateDrag.moved = true;
+
+      const task = getTask(timelineCreateDrag.taskId);
+      if (!task) return;
+      const currentDate = snapToNearestBusinessDay(addDays(timelineCreateDrag.anchorDate, deltaDays));
+      let start = timelineCreateDrag.anchorDate, end = currentDate;
+      if (end < start) { const tmp = start; start = end; end = tmp; }
+      task.startDate = start;
+      task.endDate = end;
+      task.duration = businessDaysBetweenInclusive(start, end) || 1;
+      renderTimeline();
+      return;
+    }
+
     if (!timelineDrag) return;
     const dxScreen = e.clientX - timelineDrag.startScreenX;
     const pxPerDay = ZOOM_LEVELS[ui.zoomIndex];
@@ -2550,6 +2668,19 @@ function initTimelineDragHandlers() {
   });
 
   document.addEventListener('mouseup', () => {
+    if (timelineCreateDrag) {
+      const { taskId, moved } = timelineCreateDrag;
+      timelineCreateDrag = null;
+      if (moved) {
+        saveState();
+        renderAll();
+        toast(`${taskId} scheduled.`);
+      } else {
+        openTaskModal(taskId);
+      }
+      return;
+    }
+
     if (!timelineDrag) return;
     const { taskId, moved } = timelineDrag;
     timelineDrag = null;
@@ -3144,6 +3275,7 @@ function initModal() {
       document.getElementById('statusSettingsOverlay').classList.remove('open');
       document.getElementById('categorySelectOverlay').classList.remove('open');
       document.getElementById('parentSelectOverlay').classList.remove('open');
+      document.getElementById('timelineHighlightOverlay').classList.remove('open');
       closeFirebaseModal();
     }
   });
@@ -3161,6 +3293,7 @@ function init() {
   initStatusSettings();
   initCategoryTab();
   initProjectSettingsTab();
+  initTimelineHighlight();
   renderAll();
 }
 
