@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v3.3';
+const APP_VERSION = 'v3.4';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -387,7 +387,25 @@ function generateCategoryId() {
 function getCategories() { return state.categories; }
 function getCategory(id) { return getCategories().find(c => c.id === id); }
 function getCategoryChildren(parentId) {
-  return getCategories().filter(c => c.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name));
+  return getCategories().filter(c => c.parentId === parentId);
+}
+// Reorders a category among its siblings by swapping its position in
+// the underlying state.categories array with the neighbor in that
+// direction — this is what getCategoryChildren's order reflects.
+function moveCategoryOrder(id, direction) {
+  if (guardLocked('reorder categories')) return;
+  const cat = getCategory(id);
+  if (!cat) return;
+  const siblings = getCategoryChildren(cat.parentId);
+  const idx = siblings.findIndex(c => c.id === id);
+  const targetIdx = idx + direction;
+  if (idx === -1 || targetIdx < 0 || targetIdx >= siblings.length) return;
+  const neighbor = siblings[targetIdx];
+  const iA = state.categories.indexOf(cat);
+  const iB = state.categories.indexOf(neighbor);
+  [state.categories[iA], state.categories[iB]] = [state.categories[iB], state.categories[iA]];
+  saveState();
+  renderAll();
 }
 function getCategoryDescendantIds(id, visited = new Set()) {
   const result = [];
@@ -491,6 +509,8 @@ function renderCategoryNode(cat) {
   const node = document.createElement('div');
   node.className = 'cat-node';
 
+  const siblings = getCategoryChildren(cat.parentId);
+  const siblingIndex = siblings.findIndex(c => c.id === cat.id);
   const children = getCategoryChildren(cat.id);
   const collapsed = ui.collapsedCategories.has(cat.id);
   const taskCount = state.tasks.filter(t => (t.categories || []).includes(cat.id)).length;
@@ -515,6 +535,8 @@ function renderCategoryNode(cat) {
     <span class="cat-name">${escapeHtml(cat.name)}</span>
     <span class="cat-count">${taskCount} task${taskCount === 1 ? '' : 's'}</span>
     <span class="cat-actions">
+      <button data-action="up" title="Move up" ${siblingIndex <= 0 ? 'disabled' : ''}>↑</button>
+      <button data-action="down" title="Move down" ${siblingIndex === -1 || siblingIndex >= siblings.length - 1 ? 'disabled' : ''}>↓</button>
       <button data-action="add" title="Add subcategory">+</button>
       <button data-action="rename" title="Rename">✏</button>
       <button data-action="delete" title="Delete">🗑</button>
@@ -523,7 +545,9 @@ function renderCategoryNode(cat) {
     btn.onclick = (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
-      if (action === 'add') handleAddCategory(cat.id);
+      if (action === 'up') moveCategoryOrder(cat.id, -1);
+      else if (action === 'down') moveCategoryOrder(cat.id, 1);
+      else if (action === 'add') handleAddCategory(cat.id);
       else if (action === 'rename') handleRenameCategory(cat.id);
       else if (action === 'delete') handleDeleteCategory(cat.id);
     };
@@ -809,6 +833,24 @@ function getPreviousSiblingsForTask(task) {
   return result;
 }
 
+// In sequential mode, a task can't start before its previous sibling
+// (per parent) finishes — used to clamp drags in the Timeline so the
+// bar's displayed position never silently diverges from what's actually
+// stored (without this, the underlying date would happily go wherever
+// dragged while sequential mode kept rendering it somewhere else).
+function computeMinSequentialStart(task, schedule) {
+  if (!state.sequentialPlanning) return null;
+  let minStart = null, blockingTaskId = null;
+  getPreviousSiblingsForTask(task).forEach(sib => {
+    const sibSched = schedule[sib.id];
+    if (sibSched && sibSched.finish) {
+      const candidate = nextBusinessDay(sibSched.finish);
+      if (minStart === null || candidate > minStart) { minStart = candidate; blockingTaskId = sib.id; }
+    }
+  });
+  return minStart ? { minStart, blockingTaskId } : null;
+}
+
 // Pushes starts later (never earlier) to respect sibling ordering, using
 // a proper topological sort over BOTH the real parent→child edges and
 // the virtual "previous sibling → next sibling" edges, so that by the
@@ -853,11 +895,12 @@ function applySequentialAdjustment(schedule) {
     const sched = schedule[id];
     if (!sched.start) return;
     let minStart = sched.start;
+    let blockingSiblingId = null;
     getPreviousSiblingsForTask(task).forEach(sib => {
       const sibSched = schedule[sib.id];
       if (sibSched && sibSched.finish) {
         const cand = nextBusinessDay(sibSched.finish);
-        if (cand > minStart) minStart = cand;
+        if (cand > minStart) { minStart = cand; blockingSiblingId = sib.id; }
       }
     });
     if (minStart > sched.start) {
@@ -865,6 +908,7 @@ function applySequentialAdjustment(schedule) {
       sched.finish = (task.duration != null && task.duration > 0)
         ? addBusinessDays(minStart, task.duration - 1)
         : minStart;
+      sched.sequentialBlockedBy = blockingSiblingId;
     }
   });
 }
@@ -2393,13 +2437,17 @@ function buildTimelineScheduledRowHtml(task, sched, minDate, pxPerDay, totalWidt
   const isMilestone = !(task.duration != null && task.duration > 0);
   const left = daysBetween(minDate, sched.start || sched.finish) * pxPerDay;
   let innerHtml;
+  const blocker = sched.sequentialBlockedBy ? getTask(sched.sequentialBlockedBy) : null;
+  const blockedNote = blocker
+    ? ` — can't start earlier: sequential mode is waiting for ${blocker.id} (${blocker.title}) to finish`
+    : '';
 
   if (isMilestone) {
     innerHtml = `<div class="timeline-milestone" style="left:${left}px;background-color:${meta.color};" data-id="${task.id}" title="${escapeAttr(task.title)}: ${formatDate(sched.finish)}"></div>`;
   } else {
     const derived = sched.finishSource === 'derived';
     const runs = computeBusinessRuns(sched.start, sched.finish);
-    const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}`;
+    const tooltip = `${task.title}: ${formatDate(sched.start)} → ${formatDate(sched.finish)}${derived ? ' (calculated)' : ''}${sched.conflict ? ' — deadline conflict' : ''}${blockedNote}`;
     const colorStyle = derived
       ? `color:${readableStatusColor(meta.color)};`
       : `background-color:${meta.color};color:${contrastTextFor(meta.color)};`;
@@ -2410,11 +2458,12 @@ function buildTimelineScheduledRowHtml(task, sched, minDate, pxPerDay, totalWidt
       const segWidth = Math.max(pxPerDay * 0.7, (daysBetween(runStart, runEnd) + 1) * pxPerDay - 3);
       const compact = segWidth < 74;
       const hideText = segWidth < 26;
+      const warnIcon = (i === 0 && blocker && !hideText) ? '<span class="timeline-seq-warning">⏳</span>' : '';
       const label = (i === 0 && !hideText)
         ? (compact || runs.length > 1 ? task.id : `${task.id} · ${formatDate(sched.start)} → ${formatDate(sched.finish)}`)
         : '';
       const segCls = cls.concat(compact ? 'compact' : '').filter(Boolean).join(' ');
-      return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" title="${escapeAttr(tooltip)}">${label}</div>`;
+      return `<div class="${segCls}" style="left:${segLeft}px;width:${segWidth}px;${colorStyle}" title="${escapeAttr(tooltip)}">${warnIcon}${label}</div>`;
     }).join('');
 
     const bridgeHtml = runs.slice(0, -1).map(([, runEnd], i) => {
@@ -2807,9 +2856,16 @@ function initTimelineDragHandlers() {
     const task = getTask(timelineDrag.taskId);
     if (!task) return;
 
+    timelineDrag.sequentialBlockedBy = null;
+    const seqFloor = computeMinSequentialStart(task, timelineDrag.originalSchedule);
+
     if (timelineDrag.mode === 'move') {
       let newStart = addDays(timelineDrag.origStart, deltaDays);
       newStart = snapToNearestBusinessDay(newStart);
+      if (seqFloor && newStart < seqFloor.minStart) {
+        newStart = seqFloor.minStart;
+        timelineDrag.sequentialBlockedBy = seqFloor.blockingTaskId;
+      }
       const dur = timelineDrag.origDuration;
       task.startDate = newStart;
       task.endDate = (dur != null && dur > 0) ? addBusinessDays(newStart, dur - 1) : newStart;
@@ -2818,6 +2874,10 @@ function initTimelineDragHandlers() {
       let newStart = addDays(timelineDrag.origStart, deltaDays);
       newStart = snapToNearestBusinessDay(newStart);
       if (newStart > timelineDrag.origEnd) newStart = timelineDrag.origEnd;
+      if (seqFloor && newStart < seqFloor.minStart) {
+        newStart = seqFloor.minStart;
+        timelineDrag.sequentialBlockedBy = seqFloor.blockingTaskId;
+      }
       task.startDate = newStart;
       task.endDate = timelineDrag.origEnd;
       task.duration = businessDaysBetweenInclusive(newStart, timelineDrag.origEnd) || 1;
@@ -2828,6 +2888,12 @@ function initTimelineDragHandlers() {
       task.startDate = timelineDrag.origStart;
       task.endDate = newEnd;
       task.duration = businessDaysBetweenInclusive(timelineDrag.origStart, newEnd) || 1;
+    }
+
+    if (timelineDrag.sequentialBlockedBy && !timelineDrag.warnedThisDrag) {
+      timelineDrag.warnedThisDrag = true;
+      const blocker = getTask(timelineDrag.sequentialBlockedBy);
+      toast(`⏳ Can't start earlier — sequential mode: waiting for ${blocker ? blocker.id + ' (' + blocker.title + ')' : 'a previous task'} to finish first.`);
     }
 
     const finishDelta = daysBetween(timelineDrag.origEnd, task.endDate);
@@ -2852,12 +2918,17 @@ function initTimelineDragHandlers() {
     }
 
     if (!timelineDrag) return;
-    const { taskId, moved } = timelineDrag;
+    const { taskId, moved, sequentialBlockedBy } = timelineDrag;
     timelineDrag = null;
     if (moved) {
       saveState();
       renderAll();
-      toast(`${taskId} rescheduled.`);
+      if (sequentialBlockedBy) {
+        const blocker = getTask(sequentialBlockedBy);
+        toast(`${taskId} rescheduled — but held back from starting earlier by ${blocker ? blocker.id + ' (' + blocker.title + ')' : 'a previous task'}, since sequential mode is on.`);
+      } else {
+        toast(`${taskId} rescheduled.`);
+      }
     } else {
       openTaskModal(taskId);
     }
