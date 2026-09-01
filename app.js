@@ -76,7 +76,7 @@ const TREE_ZOOM_LEVELS = [0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2]; // tree diagra
 const STORAGE_KEY = 'taskchain_state_v2';       // legacy single-project key, read once for migration
 const WORKSPACE_KEY = 'taskchain_workspace_v1'; // current multi-project storage
 const SIDEBAR_COLLAPSED_KEY = 'taskchain_sidebar_collapsed';
-const APP_VERSION = 'v3.4';
+const APP_VERSION = 'v3.5';
 
 /* ---------- State ----------
    `workspace` holds every project; `state` is always a direct reference
@@ -148,6 +148,7 @@ function normalizeProject(p) {
     t.categories = t.categories || [];
     t.description = t.description || '';
     if (!['low', 'medium', 'high'].includes(t.priority)) t.priority = 'medium';
+    t.sequentialExempt = !!t.sequentialExempt;
     // Legacy migration: a single "deadline" field used to be the only
     // date on a task (effectively its end date). Now start/end/duration
     // are all explicit and kept in sync with each other.
@@ -839,7 +840,7 @@ function getPreviousSiblingsForTask(task) {
 // stored (without this, the underlying date would happily go wherever
 // dragged while sequential mode kept rendering it somewhere else).
 function computeMinSequentialStart(task, schedule) {
-  if (!state.sequentialPlanning) return null;
+  if (!state.sequentialPlanning || task.sequentialExempt) return null;
   let minStart = null, blockingTaskId = null;
   getPreviousSiblingsForTask(task).forEach(sib => {
     const sibSched = schedule[sib.id];
@@ -893,7 +894,7 @@ function applySequentialAdjustment(schedule) {
   order.forEach(id => {
     const task = getTask(id);
     const sched = schedule[id];
-    if (!sched.start) return;
+    if (!sched.start || task.sequentialExempt) return;
     let minStart = sched.start;
     let blockingSiblingId = null;
     getPreviousSiblingsForTask(task).forEach(sib => {
@@ -930,6 +931,7 @@ function upsertTaskFromForm() {
   const endDate = document.getElementById('taskEndDate').value || null;
   const durationRaw = document.getElementById('taskDuration').value;
   const duration = durationRaw === '' ? null : Math.max(0, parseInt(durationRaw, 10));
+  const sequentialExempt = document.getElementById('taskSequentialExempt').checked;
   const parents = ui.draftParents.slice();
   const categories = ui.draftCategories.slice();
   const history = ui.draftHistory.slice();
@@ -942,6 +944,7 @@ function upsertTaskFromForm() {
     task.startDate = startDate;
     task.endDate = endDate;
     task.duration = duration;
+    task.sequentialExempt = sequentialExempt;
     task.parents = parents.filter(p => p !== id);
     task.categories = categories;
     task.priority = priority;
@@ -953,7 +956,7 @@ function upsertTaskFromForm() {
   } else {
     const newId = generateId();
     const task = {
-      id: newId, title, description, link, status, priority, startDate, endDate, duration,
+      id: newId, title, description, link, status, priority, startDate, endDate, duration, sequentialExempt,
       parents, categories,
       history: history.length ? history : [{ date: todayStr(), note: 'Task created' }],
       createdAt: nowISO(),
@@ -1390,6 +1393,7 @@ function openTaskModal(taskId) {
   document.getElementById('taskStartDate').value = task ? (task.startDate || '') : '';
   document.getElementById('taskEndDate').value = task ? (task.endDate || '') : '';
   document.getElementById('taskDuration').value = task && task.duration != null ? task.duration : '';
+  document.getElementById('taskSequentialExempt').checked = task ? !!task.sequentialExempt : false;
   document.getElementById('historyDateInput').value = todayStr();
   document.getElementById('historyNoteInput').value = '';
   document.getElementById('btnDeleteTask').hidden = !task;
@@ -1675,7 +1679,7 @@ function populateStatusSelect(selectedKey) {
 function applyTaskModalLockState() {
   const locked = isActiveProjectLocked();
   document.getElementById('taskLockBanner').hidden = !locked;
-  ['taskTitle', 'taskDescription', 'taskStatus', 'taskLink', 'taskStartDate', 'taskEndDate', 'taskDuration', 'historyDateInput', 'historyNoteInput']
+  ['taskTitle', 'taskDescription', 'taskStatus', 'taskLink', 'taskStartDate', 'taskEndDate', 'taskDuration', 'taskSequentialExempt', 'historyDateInput', 'historyNoteInput']
     .forEach(id => { document.getElementById(id).disabled = locked; });
   document.querySelectorAll('#priorityToggle button').forEach(btn => { btn.disabled = locked; });
   document.getElementById('btnEditCategories').disabled = locked;
@@ -2555,7 +2559,7 @@ function renderTimeline() {
     .join('');
 
   const dividerHtml = (scheduledItems.length && unscheduledItems.length)
-    ? `<div class="timeline-section-divider">Not yet scheduled — drag across a row below to set its dates</div>`
+    ? `<div class="timeline-section-divider"><span class="timeline-section-divider-inner">Not yet scheduled — drag across a row below to set its dates</span></div>`
     : '';
 
   const unscheduledRows = unscheduledItems
@@ -2648,9 +2652,11 @@ function renderTimelineBeta() {
 
     const collapsed = ui.collapsedCategories.has(cat.id);
     rowCount++; // header row
-    let html = `<div class="timeline-section-divider timeline-cat-header" data-cat-toggle="${cat.id}" style="padding-left:${14 + depth * 18}px;">
-      <span class="cat-toggle-inline">${collapsed ? '▶' : '▼'}</span> ${escapeHtml(cat.name)}
-      <span class="timeline-cat-count">${tasksInCat.length}</span>
+    let html = `<div class="timeline-section-divider timeline-cat-header" data-cat-toggle="${cat.id}">
+      <span class="timeline-section-divider-inner" style="padding-left:${14 + depth * 18}px;">
+        <span class="cat-toggle-inline">${collapsed ? '▶' : '▼'}</span> ${escapeHtml(cat.name)}
+        <span class="timeline-cat-count">${tasksInCat.length}</span>
+      </span>
     </div>`;
 
     if (!collapsed) {
@@ -2665,7 +2671,7 @@ function renderTimelineBeta() {
   const uncategorizedTasks = state.tasks.filter(t => !(t.categories || []).length);
   if (uncategorizedTasks.length) {
     rowCount++;
-    sectionsHtml += `<div class="timeline-section-divider">Uncategorized <span class="timeline-cat-count">${uncategorizedTasks.length}</span></div>`;
+    sectionsHtml += `<div class="timeline-section-divider"><span class="timeline-section-divider-inner">Uncategorized <span class="timeline-cat-count">${uncategorizedTasks.length}</span></span></div>`;
     sectionsHtml += renderGroupRows(uncategorizedTasks, 'uncategorized');
   }
 
